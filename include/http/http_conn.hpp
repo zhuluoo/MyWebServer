@@ -39,12 +39,13 @@ public:
     CLOSED_CONNECTION  // connection closed by client
   };
 
-  explicit HttpConn(int sockfd = -1, const sockaddr_in &addr = {});
+  HttpConn();
   HttpConn(const HttpConn &) = delete;
   auto operator=(const HttpConn &) -> HttpConn & = delete;
   ~HttpConn();
 
   void init();
+  void init(int sockfd, const sockaddr_in &addr);
   // Handle the HTTP connection
   void process();
 

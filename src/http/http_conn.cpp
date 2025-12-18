@@ -4,9 +4,9 @@
 #include <cstring>
 
 // Constructor
-HttpConn::HttpConn(int sockfd, const sockaddr_in &addr)
-    : sockfd_(sockfd), address_(addr) {
-  init();
+HttpConn::HttpConn() {
+  memset(read_buf_, '\0', sizeof(read_buf_));
+  memset(write_buf_, '\0', sizeof(write_buf_));
 }
 
 // Initialize the HTTP connection
@@ -32,6 +32,12 @@ void HttpConn::init() {
   file_stat_ = 0;
 }
 
+void HttpConn::init(int sockfd, const sockaddr_in &addr) {
+  sockfd_ = sockfd;
+  address_ = addr;
+  init();
+}
+
 // Handle the HTTP connection
 void HttpConn::process() {
   init();
@@ -46,7 +52,7 @@ void HttpConn::process() {
       // Connection closed by client
       break;
     }
-    
+
     read_idx_ += data_read;
     HTTP_CODE ret_code = parse_content();
     // Not a complete request yet, continue reading
