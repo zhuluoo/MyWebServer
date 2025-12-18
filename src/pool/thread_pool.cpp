@@ -6,7 +6,7 @@ ThreadPool::ThreadPool(size_t thread_num) : pool_(std::make_shared<Pool>()) {
   pool_->thread_num = thread_num;
   // Creat worker threads
   for (size_t i = 0; i < thread_num; ++i) {
-    std::thread([pool = pool_]() {
+    pool_->workers.emplace_back(std::thread([pool = pool_]() {
       // Keep fetching and executing tasks
       while (true) {
         std::function<void()> task;
@@ -26,20 +26,8 @@ ThreadPool::ThreadPool(size_t thread_num) : pool_(std::make_shared<Pool>()) {
         }
         task();
       }
-    }).detach();
+    }));
   }
-}
-
-// Add a new task to the thread pool
-void ThreadPool::add_task(const std::function<void()> &&task) {
-  std::unique_lock<std::mutex> lock(pool_->mtx);
-  if (pool_->is_closed) {
-    throw std::runtime_error("ThreadPool is closed. Cannot add new task.");
-  }
-  pool_->tasks.emplace(std::move(task));
-  lock.unlock();
-  // Notify one worker thread that a new task is available
-  pool_->cond.notify_one();
 }
 
 // Destructor of ThreadPool
@@ -47,13 +35,10 @@ ThreadPool::~ThreadPool() {
   pool_->is_closed = true;
   // Notify all worker threads to exit
   pool_->cond.notify_all();
-  // Wait for all tasks to complete
-  while (true) {
-    std::unique_lock<std::mutex> lock(pool_->mtx);
-    if (pool_->tasks.empty()) {
-      break;
+  // Join all worker threads
+  for (std::thread &worker : pool_->workers) {
+    if (worker.joinable()) {
+      worker.join();
     }
-    lock.unlock();
-    std::this_thread::yield();
   }
 }
