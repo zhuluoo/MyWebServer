@@ -6,11 +6,12 @@
 #include <unistd.h>
 
 #include "server/web_server.hpp"
+#include "pool/thread_pool.hpp"
 
 // Constructor
 WebServer::WebServer(const char *ip, int port, std::size_t max_conn,
                      std::size_t thread_num)
-    : ip_(strdup(ip)), port_(port), max_conn_(max_conn), users_(max_conn) {
+    : ip_(strdup(ip)), port_(port), max_conn_(max_conn) {
   // Initialize listening socket, epoll instance, and thread pool here
   listen_fd_ = socket(AF_INET, SOCK_STREAM, 0);
   if (listen_fd_ == -1) {
@@ -122,18 +123,30 @@ auto WebServer::run() -> void {
           close(conn_fd);
           continue;
         }
-        users_[conn_fd].init(conn_fd, client_addr);
+        users_[conn_fd] = std::make_shared<HttpConn>();
+        users_[conn_fd]->init(conn_fd, client_addr, epoll_fd_);
         add_fd(conn_fd, true);
       } else if (events[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR)) {
         // Connection closed or error
-        users_[sockfd].~HttpConn();
+        users_.erase(sockfd);
         remove_fd(sockfd);
       } else if (events[i].events & EPOLLIN) {
-        // Read event
-        /*TODO*/
+        // Read event: fill buffer, then dispatch to thread pool for parsing
+        auto &conn = users_[sockfd];
+        if (!conn -> read()) {
+          // Read error or connection closed by client
+          users_.erase(sockfd);
+          remove_fd(sockfd);
+          continue;
+        }
+        thread_pool_->add_task([&conn]() { conn->process(); });
       } else if (events[i].events & EPOLLOUT) {
-        // Write event
-        /*TODO*/
+        // Write event: attempt to send pending data
+        if (!users_[sockfd]->write()) {
+          // write() closes the connection on failure
+          users_.erase(sockfd);
+          remove_fd(sockfd);
+        }
       }
     }
   }

@@ -45,21 +45,34 @@ public:
   ~HttpConn();
 
   void init();
-  void init(int sockfd, const sockaddr_in &addr);
+  void init(int sockfd, const sockaddr_in &addr, int epollfd);
   // Handle the HTTP connection
   void process();
+  // Non-block read all available data from the socket(for ET mode)
+  auto read() -> bool;
+  // Non-block write all data to the socket(for ET mode)
+  auto write() -> bool;
 
 private:
-  // The entry of main state machine
-  auto parse_content() -> HTTP_CODE;
-  // Find out a complete line, sub state machine
-  auto parse_line() -> LINE_STATUS;
-  // Parse the HTTP request line
-  auto parse_request(char *) -> HTTP_CODE;
-  // Parse HTTP headers
-  auto parse_header(char *) -> HTTP_CODE;
+  // Process the read operation
+  auto process_read() -> HTTP_CODE;
+  auto parse_request(char *) -> HTTP_CODE; // For request line
+  auto parse_header(char *) -> HTTP_CODE;  // For headers
+  auto parse_content() -> HTTP_CODE;       // For message body
+  auto parse_line() -> LINE_STATUS;        // Find a complete line
+  // Process the write operation
+  auto process_write(HTTP_CODE ret) -> bool;
+  auto add_response(const char *format, ...)
+      -> bool; // Add response to write buffer
+
+  // Utility functions for epoll
+  auto set_nonblocking(int interest_fd) -> int;
+  auto mod_fd(int interest_fd, int ev) -> void;
+  // auto add_fd(int interest_fd, bool one_shot) -> void;
+  // auto remove_fd(int interest_fd) -> void;
 
   int sockfd_ = -1;     // socket file descriptor
+  int epollfd_ = -1;    // epoll file descriptor
   sockaddr_in address_; // client address
 
   char read_buf_[2048]; // read buffer
