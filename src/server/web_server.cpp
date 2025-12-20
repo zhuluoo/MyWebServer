@@ -3,6 +3,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <sys/epoll.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include "server/web_server.hpp"
@@ -70,6 +71,10 @@ auto WebServer::mod_fd(int interest_fd, int ev) -> void {
 }
 
 void WebServer::start_listening() {
+  // Enable address reuse to avoid "Address already in use" errors
+  int opt = 1;
+  setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
   sockaddr_in address;
   address.sin_family = AF_INET;
   address.sin_addr.s_addr = inet_addr(ip_);
@@ -82,7 +87,7 @@ void WebServer::start_listening() {
     exit(EXIT_FAILURE);
   }
 
-  ret = listen(listen_fd_, 5);
+  ret = listen(listen_fd_, SOMAXCONN);
   if (ret == -1) {
     perror("Listen error");
     exit(EXIT_FAILURE);
@@ -110,36 +115,43 @@ auto WebServer::run() -> void {
       int sockfd = events[i].data.fd;
       // New connection
       if (sockfd == listen_fd_) {
-        sockaddr_in client_addr;
-        socklen_t client_addr_len = sizeof(client_addr);
-        int conn_fd =
-            accept(listen_fd_, reinterpret_cast<sockaddr *>(&client_addr),
-                   &client_addr_len);
-        if (conn_fd < 0) {
-          perror("Accept error");
-          continue;
-        }
-        if (users_.size() >= max_conn_) {
-          close(conn_fd);
-          continue;
-        }
-        users_[conn_fd] = std::make_shared<HttpConn>();
-        users_[conn_fd]->init(conn_fd, client_addr, epoll_fd_);
-        add_fd(conn_fd, true);
+        // In ET mode, must accept ALL pending connections in a loop
+        while (true) {
+          sockaddr_in client_addr;
+          socklen_t client_addr_len = sizeof(client_addr);
+          int conn_fd =
+              accept(listen_fd_, reinterpret_cast<sockaddr *>(&client_addr),
+                     &client_addr_len);
+          if (conn_fd < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+              // No more pending connections
+              break;
+            }
+            perror("Accept error");
+            break;
+          }
+          if (users_.size() >= max_conn_) {
+            close(conn_fd);
+            continue;
+          }
+          users_[conn_fd] = std::make_shared<HttpConn>();
+          users_[conn_fd]->init(conn_fd, client_addr, epoll_fd_);
+          add_fd(conn_fd, true);
+        }  // end of accept loop
       } else if (events[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR)) {
         // Connection closed or error
         users_.erase(sockfd);
         remove_fd(sockfd);
       } else if (events[i].events & EPOLLIN) {
         // Read event: fill buffer, then dispatch to thread pool for parsing
-        auto &conn = users_[sockfd];
-        if (!conn -> read()) {
+        auto conn = users_[sockfd];  // Copy shared_ptr, not reference!
+        if (!conn->read()) {
           // Read error or connection closed by client
           users_.erase(sockfd);
           remove_fd(sockfd);
           continue;
         }
-        thread_pool_->add_task([&conn]() { conn->process(); });
+        thread_pool_->add_task([conn]() { conn->process(); });  // Capture by value!
       } else if (events[i].events & EPOLLOUT) {
         // Write event: attempt to send pending data
         if (!users_[sockfd]->write()) {

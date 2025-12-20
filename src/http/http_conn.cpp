@@ -129,11 +129,13 @@ auto HttpConn::write() -> bool {
   }
 
   // All data has been sent successfully
-  write_idx_ = 0;
   // If connection is not persistent, close it
   if (!linger_) {
     return false; // Indicate to close connection
   }
+  // Keep-alive: reset state for next request and re-arm for reading
+  init();
+  mod_fd(sockfd_, EPOLLIN);
   return true;
 }
 
