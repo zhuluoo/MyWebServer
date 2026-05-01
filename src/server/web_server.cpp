@@ -2,14 +2,17 @@
 #include <arpa/inet.h>
 #include <cstring>
 #include <fcntl.h>
+#if defined(__linux__)
 #include <sys/epoll.h>
+#elif defined(__APPLE__)
+#include <sys/event.h>
+#endif
 #include <sys/socket.h>
 #include <unistd.h>
 
 #include "server/web_server.hpp"
 #include "pool/thread_pool.hpp"
 
-// Constructor
 WebServer::WebServer(const char *ip, int port, std::size_t max_conn,
                      std::size_t thread_num)
     : ip_(strdup(ip)), port_(port), max_conn_(max_conn) {
@@ -19,55 +22,32 @@ WebServer::WebServer(const char *ip, int port, std::size_t max_conn,
     perror("Socket creation error");
     exit(EXIT_FAILURE);
   }
+  #if defined(__linux__)
   epoll_fd_ = epoll_create(5);
   if (epoll_fd_ == -1) {
-    perror("Epoll creation error");
+    perror("Epoll creation error.");
     exit(EXIT_FAILURE);
   }
+  #elif defined(__APPLE__)
+  kq_fd_ = kqueue();
+  if (kq_fd_ == -1) {
+    perror("Kqueue creation error.");
+    exit(EXIT_FAILURE);
+  }
+  #endif
   thread_pool_ = std::make_unique<ThreadPool>(thread_num);
 }
 
-// Destructor
 WebServer::~WebServer() {
   close(listen_fd_);
+  #if defined(__linux__)
   close(epoll_fd_);
+  #elif defined(__APPLE__)
+  close(kq_fd_);
+  #endif
   free(ip_);
   users_.clear();
   thread_pool_.reset();
-}
-
-// Set a file descriptor to non-blocking mode
-auto WebServer::set_nonblocking(int interest_fd) -> int {
-  int old_option = fcntl(interest_fd, F_GETFL);
-  int new_option = old_option | O_NONBLOCK;
-  fcntl(interest_fd, F_SETFL, new_option);
-  return old_option;
-}
-
-// Add a file descriptor to the epoll instance
-auto WebServer::add_fd(int interest_fd, bool one_shot) -> void {
-  epoll_event event;
-  event.data.fd = interest_fd;
-  event.events = EPOLLIN | EPOLLET | EPOLLRDHUP;
-  if (one_shot) {
-    event.events |= EPOLLONESHOT;
-  }
-  epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, interest_fd, &event);
-  set_nonblocking(interest_fd);
-}
-
-// Remove a file descriptor from the epoll instance
-auto WebServer::remove_fd(int interest_fd) -> void {
-  epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, interest_fd, nullptr);
-  close(interest_fd);
-}
-
-// Modify the events associated with a file descriptor in the epoll instance
-auto WebServer::mod_fd(int interest_fd, int ev) -> void {
-  epoll_event event;
-  event.data.fd = interest_fd;
-  event.events = ev | EPOLLET | EPOLLRDHUP | EPOLLONESHOT;
-  epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, interest_fd, &event);
 }
 
 void WebServer::start_listening() {
@@ -96,21 +76,19 @@ void WebServer::start_listening() {
   add_fd(listen_fd_, false);
 }
 
-// Start the web server
-auto WebServer::run() -> void {
-  std::size_t max_events = 10000;
-  epoll_event events[max_events];
+#if defined(__linux__)
+void WebServer::run() {
+  epoll_event events[MAX_EVENTS];
   start_listening();
   // Main event loop would go here
   while (true) {
-    int num_events = epoll_wait(epoll_fd_, events, max_events, -1);
+    int num_events = epoll_wait(epoll_fd_, events, MAX_EVENTS, -1);
     // error and not interrupted by signal
     if (num_events < 0 && errno != EINTR) {
       perror("Epoll wait error");
       break;
     }
 
-    // Handle events here
     for (int i = 0; i < num_events; ++i) {
       int sockfd = events[i].data.fd;
       // New connection
@@ -162,4 +140,118 @@ auto WebServer::run() -> void {
       }
     }
   }
+}
+
+void WebServer::add_fd(int interest_fd, bool one_shot) {
+  epoll_event event;
+  event.data.fd = interest_fd;
+  event.events = EPOLLIN | EPOLLET | EPOLLRDHUP;
+  if (one_shot) {
+    event.events |= EPOLLONESHOT;
+  }
+  epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, interest_fd, &event);
+  set_nonblocking(interest_fd);
+}
+
+void WebServer::remove_fd(int interest_fd) {
+  epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, interest_fd, nullptr);
+  close(interest_fd);
+}
+#elif defined(__APPLE__)
+void WebServer::run() {
+  struct kevent events[MAX_EVENTS];
+  start_listening();
+  while (true) {
+    int num_events = kevent(kq_fd_, nullptr, 0, events, MAX_EVENTS, nullptr);
+    // Error and not interrupted by signal
+    if (num_events < 0 && errno != EINTR) {
+      perror("Kqueue wait error");
+      break;
+    }
+
+    for (int i = 0; i < num_events; ++i) {
+      int sockfd = static_cast<int>(events[i].ident);
+      uint16_t flags = events[i].flags;
+      int16_t filter = events[i].filter;
+
+      if (flags & (EV_ERROR | EV_EOF)) {
+        users_.erase(sockfd);
+        remove_fd(sockfd);
+        continue;
+      }
+
+      if (sockfd == listen_fd_) {
+        // In ET mode, must handle all pending connections
+        while (true) {
+          sockaddr_in client_addr;
+          socklen_t client_addr_len = sizeof(client_addr);
+          int conn_fd = accept(listen_fd_, reinterpret_cast<sockaddr *>(&client_addr), &client_addr_len);
+          if (conn_fd < 0) {
+            // No more
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+              break;
+            }
+            perror("Accept connection error.");
+            break;
+          }
+
+          if (users_.size() >= max_conn_) {
+            close(conn_fd);
+            continue;
+          }
+
+          users_[conn_fd] = std::make_shared<HttpConn>();
+          users_[conn_fd]->init(conn_fd, client_addr, kq_fd_);
+          add_fd(conn_fd, true);
+        }
+        continue;
+      }
+
+      if (filter == EVFILT_READ) {
+        auto conn = users_[sockfd];
+        if (!conn || !conn->read()) {
+          users_.erase(sockfd);
+          remove_fd(sockfd);
+          continue;
+        }
+        thread_pool_->add_task([conn]() {conn->process();});
+      }
+
+      if (filter == EVFILT_WRITE) {
+        auto conn = users_[sockfd];
+        if (!conn || !conn->write()) {
+          users_.erase(sockfd);
+          remove_fd(sockfd);
+        }
+      }
+    }
+  }
+}
+
+void WebServer::add_fd(int interest_fd, bool one_shot) {
+  struct kevent event;
+  uint16_t flags = EV_ADD | EV_ENABLE | EV_CLEAR;
+  if (one_shot) {
+    flags |= EV_ONESHOT;
+  }
+  EV_SET(&event, interest_fd, EVFILT_READ, flags, 0, 0, (void *)(intptr_t)interest_fd);
+  if (kevent(kq_fd_, &event, 1, nullptr, 0, nullptr) == -1) {
+    perror("Kqueue add failed.");
+  }
+  set_nonblocking(interest_fd);
+}
+
+void WebServer::remove_fd(int interest_fd) {
+  struct kevent event;
+  EV_SET(&event, interest_fd, EVFILT_READ, EV_DELETE, 0, 0, nullptr);
+  kevent(kq_fd_, &event, 1, nullptr, 0, nullptr);
+  close(interest_fd);
+}
+#endif
+
+auto WebServer::set_nonblocking(int interest_fd) -> int {
+  int old_option = fcntl(interest_fd, F_GETFL);
+  int new_option = old_option | O_NONBLOCK;
+  fcntl(interest_fd, F_SETFL, new_option);
+  return old_option;
 }

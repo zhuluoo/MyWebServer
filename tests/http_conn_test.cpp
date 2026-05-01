@@ -1,7 +1,11 @@
 #include <atomic>
 #include <cassert>
 #include <iostream>
+#if defined(__linux__)
 #include <sys/epoll.h>
+#elif defined(__APPLE__)
+#include <sys/event.h>
+#endif
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <thread>
@@ -11,6 +15,7 @@
 
 #include "http/http_conn.hpp"
 
+#if defined(__linux__)
 int main() {
   std::cout << "Running HTTP Server Tests...\n";
 
@@ -82,3 +87,4 @@ int main() {
   std::cout << "All tests passed!\n";
   return 0;
 }
+#endif

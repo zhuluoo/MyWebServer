@@ -39,13 +39,18 @@ public:
     CLOSED_CONNECTION  // connection closed by client
   };
 
+  enum class NetEvent {
+    READ_EVENT,
+    WRITE_EVENT
+  };
+
   HttpConn();
   HttpConn(const HttpConn &) = delete;
   auto operator=(const HttpConn &) -> HttpConn & = delete;
   ~HttpConn();
 
   void init();
-  void init(int sockfd, const sockaddr_in &addr, int epollfd);
+  void init(int sockfd, const sockaddr_in &addr, int fd);
   // Handle the HTTP connection
   void process();
   // Non-block read all available data from the socket(for ET mode)
@@ -67,12 +72,16 @@ private:
 
   // Utility functions for epoll
   auto set_nonblocking(int interest_fd) -> int;
-  auto mod_fd(int interest_fd, int ev) -> void;
+  void mod_fd(int interest_fd, NetEvent ev);
   // auto add_fd(int interest_fd, bool one_shot) -> void;
   // auto remove_fd(int interest_fd) -> void;
 
   int sockfd_ = -1;     // socket file descriptor
+  #if defined(__linux__)
   int epollfd_ = -1;    // epoll file descriptor
+  #elif defined(__APPLE__)
+  int kq_;
+  #endif
   sockaddr_in address_; // client address
 
   char read_buf_[2048]; // read buffer

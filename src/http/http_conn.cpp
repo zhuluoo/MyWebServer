@@ -5,7 +5,11 @@
 #include <cstdarg>
 #include <cstring>
 #include <fcntl.h>
+#if defined(__linux__)
 #include <sys/epoll.h>
+#elif defined(__APPLE__)
+#include <sys/event.h>
+#endif
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -41,10 +45,14 @@ void HttpConn::init() {
   file_stat_ = 0;
 }
 
-void HttpConn::init(int sockfd, const sockaddr_in &addr, int epollfd) {
+void HttpConn::init(int sockfd, const sockaddr_in &addr, int fd) {
   sockfd_ = sockfd;
   address_ = addr;
-  epollfd_ = epollfd;
+  #if defined(__linux__)
+  int epollfd_ = fd;    // epoll file descriptor
+  #elif defined(__APPLE__)
+  kq_ = fd;
+  #endif
   init();
 }
 
@@ -52,7 +60,7 @@ void HttpConn::process() {
   HTTP_CODE read_ret = process_read();
   if (read_ret == NO_REQUEST) {
     // Need to read more data; re-arm EPOLLIN for this socket (one-shot)
-    mod_fd(sockfd_, EPOLLIN);
+    mod_fd(sockfd_, NetEvent::READ_EVENT);
     return;
   }
   bool write_ret = process_write(read_ret);
@@ -61,7 +69,7 @@ void HttpConn::process() {
     write_idx_ = -1;
   }
   // Ready to send response in write_buf_, switch to EPOLLOUT for sending
-  mod_fd(sockfd_, EPOLLOUT);
+  mod_fd(sockfd_, NetEvent::WRITE_EVENT);
 }
 
 // Read available data from the socket (non-blocking ET loop)
@@ -114,7 +122,7 @@ auto HttpConn::write() -> bool {
     if (bytes_written == -1) {
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
         // Socket buffer full; re-arm EPOLLOUT for next write attempt
-        mod_fd(sockfd_, EPOLLOUT);
+        mod_fd(sockfd_, NetEvent::WRITE_EVENT);
         return true; // Keep connection alive for retry
       }
       // Other socket error
@@ -135,7 +143,7 @@ auto HttpConn::write() -> bool {
   }
   // Keep-alive: reset state for next request and re-arm for reading
   init();
-  mod_fd(sockfd_, EPOLLIN);
+  mod_fd(sockfd_, NetEvent::READ_EVENT);
   return true;
 }
 
@@ -430,11 +438,36 @@ auto HttpConn::set_nonblocking(int interest_fd) -> int {
   return old_option;
 }
 
-// Modify the events associated with a file descriptor in the epoll instance
-auto HttpConn::mod_fd(int interest_fd, int ev) -> void {
+#if defined(__linux__)
+void HttpConn::mod_fd(int interest_fd, NetEvent ev) {
+  int event = -1;
+  if (ev == NetEvent::READ_EVENT) {
+    event = EPOLLREAD;
+  } else if (ev == NetEvent::WRITE_EVENT) {
+    event = EPOLLOUT;
+  } else {
+    return;
+  }
+
   epoll_event event;
   event.data.fd = interest_fd;
   // Set new events while keeping ET, RDHUP, and ONESHOT flags
-  event.events = ev | EPOLLET | EPOLLRDHUP | EPOLLONESHOT;
+  event.events = event | EPOLLET | EPOLLRDHUP | EPOLLONESHOT;
   epoll_ctl(epollfd_, EPOLL_CTL_MOD, interest_fd, &event);
 }
+#elif defined(__APPLE__)
+void HttpConn::mod_fd(int interest_fd, NetEvent ev) {
+  int16_t filter = -1;
+  if (ev == NetEvent::READ_EVENT) {
+    filter = EVFILT_READ;
+  } else if (ev == NetEvent::WRITE_EVENT) {
+    filter = EVFILT_WRITE;
+  } else {
+    return;
+  }
+
+  struct kevent event;
+  EV_SET(&event, interest_fd, filter, EV_ADD | EV_ENABLE | EV_CLEAR | EV_ONESHOT, 0, 0, (void *)(intptr_t)interest_fd);
+  kevent(kq_, &event, 1, nullptr, 0, nullptr); 
+}
+#endif
