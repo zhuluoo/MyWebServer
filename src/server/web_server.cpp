@@ -1,7 +1,8 @@
 // filename: web_server.cpp
 #include <arpa/inet.h>
-#include <cstring>
 #include <fcntl.h>
+
+#include <cstring>
 #if defined(__linux__)
 #include <sys/epoll.h>
 #elif defined(__APPLE__)
@@ -10,10 +11,10 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#include "server/web_server.hpp"
 #include "pool/thread_pool.hpp"
+#include "server/web_server.hpp"
 
-WebServer::WebServer(const char *ip, int port, std::size_t max_conn,
+WebServer::WebServer(const char* ip, int port, std::size_t max_conn,
                      std::size_t thread_num)
     : ip_(strdup(ip)), port_(port), max_conn_(max_conn) {
   // Initialize listening socket, epoll instance, and thread pool here
@@ -22,29 +23,29 @@ WebServer::WebServer(const char *ip, int port, std::size_t max_conn,
     perror("Socket creation error");
     exit(EXIT_FAILURE);
   }
-  #if defined(__linux__)
+#if defined(__linux__)
   epoll_fd_ = epoll_create(5);
   if (epoll_fd_ == -1) {
     perror("Epoll creation error.");
     exit(EXIT_FAILURE);
   }
-  #elif defined(__APPLE__)
+#elif defined(__APPLE__)
   kq_fd_ = kqueue();
   if (kq_fd_ == -1) {
     perror("Kqueue creation error.");
     exit(EXIT_FAILURE);
   }
-  #endif
+#endif
   thread_pool_ = std::make_unique<ThreadPool>(thread_num);
 }
 
 WebServer::~WebServer() {
   close(listen_fd_);
-  #if defined(__linux__)
+#if defined(__linux__)
   close(epoll_fd_);
-  #elif defined(__APPLE__)
+#elif defined(__APPLE__)
   close(kq_fd_);
-  #endif
+#endif
   free(ip_);
   users_.clear();
   thread_pool_.reset();
@@ -61,7 +62,7 @@ void WebServer::start_listening() {
   address.sin_port = htons(port_);
 
   int ret = 0;
-  ret = bind(listen_fd_, (sockaddr *)&address, sizeof(address));
+  ret = bind(listen_fd_, (sockaddr*)&address, sizeof(address));
   if (ret == -1) {
     perror("Bind error");
     exit(EXIT_FAILURE);
@@ -98,7 +99,7 @@ void WebServer::run() {
           sockaddr_in client_addr;
           socklen_t client_addr_len = sizeof(client_addr);
           int conn_fd =
-              accept(listen_fd_, reinterpret_cast<sockaddr *>(&client_addr),
+              accept(listen_fd_, reinterpret_cast<sockaddr*>(&client_addr),
                      &client_addr_len);
           if (conn_fd < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -129,7 +130,8 @@ void WebServer::run() {
           remove_fd(sockfd);
           continue;
         }
-        thread_pool_->add_task([conn]() { conn->process(); });  // Capture by value!
+        thread_pool_->add_task(
+            [conn]() { conn->process(); });  // Capture by value!
       } else if (events[i].events & EPOLLOUT) {
         // Write event: attempt to send pending data
         if (!users_[sockfd]->write()) {
@@ -185,7 +187,9 @@ void WebServer::run() {
         while (true) {
           sockaddr_in client_addr;
           socklen_t client_addr_len = sizeof(client_addr);
-          int conn_fd = accept(listen_fd_, reinterpret_cast<sockaddr *>(&client_addr), &client_addr_len);
+          int conn_fd =
+              accept(listen_fd_, reinterpret_cast<sockaddr*>(&client_addr),
+                     &client_addr_len);
           if (conn_fd < 0) {
             // No more
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -214,7 +218,7 @@ void WebServer::run() {
           remove_fd(sockfd);
           continue;
         }
-        thread_pool_->add_task([conn]() {conn->process();});
+        thread_pool_->add_task([conn]() { conn->process(); });
       }
 
       if (filter == EVFILT_WRITE) {
@@ -234,7 +238,8 @@ void WebServer::add_fd(int interest_fd, bool one_shot) {
   if (one_shot) {
     flags |= EV_ONESHOT;
   }
-  EV_SET(&event, interest_fd, EVFILT_READ, flags, 0, 0, (void *)(intptr_t)interest_fd);
+  EV_SET(&event, interest_fd, EVFILT_READ, flags, 0, 0,
+         (void*)(intptr_t)interest_fd);
   if (kevent(kq_fd_, &event, 1, nullptr, 0, nullptr) == -1) {
     perror("Kqueue add failed.");
   }

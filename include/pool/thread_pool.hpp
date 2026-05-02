@@ -11,15 +11,16 @@
 #include <vector>
 
 class ThreadPool {
-public:
+ public:
   explicit ThreadPool(size_t thread_num = 8);
   ~ThreadPool();
-  ThreadPool(const ThreadPool &) = delete;
-  auto operator=(const ThreadPool &) -> ThreadPool & = delete;
+  ThreadPool(const ThreadPool&) = delete;
+  auto operator=(const ThreadPool&) -> ThreadPool& = delete;
 
-  template <typename F> void add_task(F &&task);
+  template <typename F>
+  void add_task(F&& task);
 
-private:
+ private:
   struct Pool {
     std::mutex mtx;
     std::condition_variable cond;
@@ -33,7 +34,8 @@ private:
 };
 
 // Add a new task to the thread pool
-template <typename F> void ThreadPool::add_task(F &&task) {
+template <typename F>
+void ThreadPool::add_task(F&& task) {
   std::unique_lock<std::mutex> lock(pool_->mtx);
   if (pool_->is_closed) {
     throw std::runtime_error("ThreadPool is closed. Cannot add new task.");

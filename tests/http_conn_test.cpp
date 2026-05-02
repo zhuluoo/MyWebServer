@@ -6,12 +6,13 @@
 #elif defined(__APPLE__)
 #include <sys/event.h>
 #endif
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/un.h>
-#include <thread>
 #include <unistd.h>
+
+#include <thread>
 #include <vector>
-#include <fcntl.h>
 
 #include "http/http_conn.hpp"
 
@@ -50,7 +51,7 @@ int main() {
   std::cout << "HttpConn initialized\n";
 
   // Client side sends a request
-  const char *req =
+  const char* req =
       "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
   ssize_t sent = send(sv[1], req, strlen(req), 0);
   std::cout << "Client sent: " << sent << " bytes\n";

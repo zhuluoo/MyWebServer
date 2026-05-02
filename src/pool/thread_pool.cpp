@@ -36,7 +36,7 @@ ThreadPool::~ThreadPool() {
   // Notify all worker threads to exit
   pool_->cond.notify_all();
   // Join all worker threads
-  for (std::thread &worker : pool_->workers) {
+  for (std::thread& worker : pool_->workers) {
     if (worker.joinable()) {
       worker.join();
     }

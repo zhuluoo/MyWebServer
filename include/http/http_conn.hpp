@@ -2,11 +2,12 @@
 // filename: http_conn.hpp
 
 #include <netinet/in.h>
+
 #include <string>
 
 // Class to handle HTTP connections
 class HttpConn {
-public:
+ public:
   // HTTP request methods
   enum METHOD {
     GET = 0,
@@ -29,28 +30,25 @@ public:
   enum LINE_STATUS { LINE_OK = 0, LINE_BAD, LINE_OPEN };
   // HTTP response codes
   enum HTTP_CODE {
-    NO_REQUEST = 0,    // request not complete yet, continue reading
-    GET_REQUEST,       // got a complete request (200)
-    BAD_REQUEST,       // malformed request (400)
-    NO_RESOURCE,       // resource not found (404)
-    FORBIDDEN_REQUEST, // access forbidden (403)
-    FILE_REQUEST,      // file request successful (200)
-    INTERNAL_ERROR,    // internal server error (500)
-    CLOSED_CONNECTION  // connection closed by client
+    NO_REQUEST = 0,     // request not complete yet, continue reading
+    GET_REQUEST,        // got a complete request (200)
+    BAD_REQUEST,        // malformed request (400)
+    NO_RESOURCE,        // resource not found (404)
+    FORBIDDEN_REQUEST,  // access forbidden (403)
+    FILE_REQUEST,       // file request successful (200)
+    INTERNAL_ERROR,     // internal server error (500)
+    CLOSED_CONNECTION   // connection closed by client
   };
 
-  enum class NetEvent {
-    READ_EVENT,
-    WRITE_EVENT
-  };
+  enum class NetEvent { READ_EVENT, WRITE_EVENT };
 
   HttpConn();
-  HttpConn(const HttpConn &) = delete;
-  auto operator=(const HttpConn &) -> HttpConn & = delete;
+  HttpConn(const HttpConn&) = delete;
+  auto operator=(const HttpConn&) -> HttpConn& = delete;
   ~HttpConn();
 
   void init();
-  void init(int sockfd, const sockaddr_in &addr, int fd);
+  void init(int sockfd, const sockaddr_in& addr, int fd);
   // Handle the HTTP connection
   void process();
   // Non-block read all available data from the socket(for ET mode)
@@ -58,17 +56,17 @@ public:
   // Non-block write all data to the socket(for ET mode)
   auto write() -> bool;
 
-private:
+ private:
   // Process the read operation
   auto process_read() -> HTTP_CODE;
-  auto parse_request(char *) -> HTTP_CODE; // For request line
-  auto parse_header(char *) -> HTTP_CODE;  // For headers
+  auto parse_request(char*) -> HTTP_CODE;  // For request line
+  auto parse_header(char*) -> HTTP_CODE;   // For headers
   auto parse_content() -> HTTP_CODE;       // For message body
   auto parse_line() -> LINE_STATUS;        // Find a complete line
   // Process the write operation
   auto process_write(HTTP_CODE ret) -> bool;
-  auto add_response(const char *format, ...)
-      -> bool; // Add response to write buffer
+  auto add_response(const char* format, ...)
+      -> bool;  // Add response to write buffer
 
   // Utility functions for epoll
   auto set_nonblocking(int interest_fd) -> int;
@@ -76,33 +74,33 @@ private:
   // auto add_fd(int interest_fd, bool one_shot) -> void;
   // auto remove_fd(int interest_fd) -> void;
 
-  int sockfd_ = -1;     // socket file descriptor
-  #if defined(__linux__)
-  int epollfd_ = -1;    // epoll file descriptor
-  #elif defined(__APPLE__)
+  int sockfd_ = -1;  // socket file descriptor
+#if defined(__linux__)
+  int epollfd_ = -1;  // epoll file descriptor
+#elif defined(__APPLE__)
   int kq_;
-  #endif
-  sockaddr_in address_; // client address
+#endif
+  sockaddr_in address_;  // client address
 
-  char read_buf_[2048]; // read buffer
-  int read_idx_ = 0;    // index of the next byte to read
-  int checked_idx_ = 0; // index of the byte being analyzed
-  int start_line_ = 0;  // start index of the current line being parsed
+  char read_buf_[2048];  // read buffer
+  int read_idx_ = 0;     // index of the next byte to read
+  int checked_idx_ = 0;  // index of the byte being analyzed
+  int start_line_ = 0;   // start index of the current line being parsed
 
-  char write_buf_[1024]; // write buffer
-  int write_idx_ = 0;    // index of the next byte to write
+  char write_buf_[1024];  // write buffer
+  int write_idx_ = 0;     // index of the next byte to write
 
-  int version_ = 0;     // HTTP version
-  std::string url_{};   // request URL
-  std::string host_{};  // Host header value
-  bool linger_ = false; // whether to keep the connection alive
+  int version_ = 0;      // HTTP version
+  std::string url_{};    // request URL
+  std::string host_{};   // Host header value
+  bool linger_ = false;  // whether to keep the connection alive
 
-  METHOD method_;           // request method
-  CHECK_STATE check_state_; // main state machine current state
-  LINE_STATUS line_status_; // line parsing status
+  METHOD method_;            // request method
+  CHECK_STATE check_state_;  // main state machine current state
+  LINE_STATUS line_status_;  // line parsing status
 
-  char *file_address_ = nullptr; // requested file address
-  int file_stat_ = 0;            // file status
+  char* file_address_ = nullptr;  // requested file address
+  int file_stat_ = 0;             // file status
 };
 
 /* HTTP Request message structure

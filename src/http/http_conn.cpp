@@ -1,10 +1,11 @@
 #include "http/http_conn.hpp"
 // filename: http_conn.cpp
 
+#include <fcntl.h>
+
 #include <cerrno>
 #include <cstdarg>
 #include <cstring>
-#include <fcntl.h>
 #if defined(__linux__)
 #include <sys/epoll.h>
 #elif defined(__APPLE__)
@@ -45,14 +46,14 @@ void HttpConn::init() {
   file_stat_ = 0;
 }
 
-void HttpConn::init(int sockfd, const sockaddr_in &addr, int fd) {
+void HttpConn::init(int sockfd, const sockaddr_in& addr, int fd) {
   sockfd_ = sockfd;
   address_ = addr;
-  #if defined(__linux__)
-  int epollfd_ = fd;    // epoll file descriptor
-  #elif defined(__APPLE__)
+#if defined(__linux__)
+  int epollfd_ = fd;  // epoll file descriptor
+#elif defined(__APPLE__)
   kq_ = fd;
-  #endif
+#endif
   init();
 }
 
@@ -76,7 +77,7 @@ void HttpConn::process() {
 auto HttpConn::read() -> bool {
   // Protect against overflowing the read buffer
   if (read_idx_ >= static_cast<int>(sizeof(read_buf_) - 1)) {
-    return false; // buffer full -> treat as error
+    return false;  // buffer full -> treat as error
   }
 
   ssize_t bytes_read = 0;
@@ -123,7 +124,7 @@ auto HttpConn::write() -> bool {
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
         // Socket buffer full; re-arm EPOLLOUT for next write attempt
         mod_fd(sockfd_, NetEvent::WRITE_EVENT);
-        return true; // Keep connection alive for retry
+        return true;  // Keep connection alive for retry
       }
       // Other socket error
       return false;
@@ -139,7 +140,7 @@ auto HttpConn::write() -> bool {
   // All data has been sent successfully
   // If connection is not persistent, close it
   if (!linger_) {
-    return false; // Indicate to close connection
+    return false;  // Indicate to close connection
   }
   // Keep-alive: reset state for next request and re-arm for reading
   init();
@@ -151,7 +152,7 @@ auto HttpConn::write() -> bool {
 auto HttpConn::process_read() -> HTTP_CODE {
   line_status_ = LINE_OK;
   HTTP_CODE ret = NO_REQUEST;
-  char *text = nullptr;
+  char* text = nullptr;
   // Main state machine loop
   while ((check_state_ == CHECK_STATE_CONTENT && line_status_ == LINE_OK) ||
          ((line_status_ = parse_line()) == LINE_OK)) {
@@ -160,35 +161,35 @@ auto HttpConn::process_read() -> HTTP_CODE {
     // Update start_line_ to the next line
     start_line_ = checked_idx_;
     switch (check_state_) {
-      // Parse request line
-    case CHECK_STATE_REQUESTLINE: {
-      ret = parse_request(text);
-      if (ret == BAD_REQUEST) {
-        return BAD_REQUEST;
+        // Parse request line
+      case CHECK_STATE_REQUESTLINE: {
+        ret = parse_request(text);
+        if (ret == BAD_REQUEST) {
+          return BAD_REQUEST;
+        }
+        break;
       }
-      break;
-    }
-    // Parse headers
-    case CHECK_STATE_HEADER: {
-      ret = parse_header(text);
-      if (ret == BAD_REQUEST) {
-        return BAD_REQUEST;
+      // Parse headers
+      case CHECK_STATE_HEADER: {
+        ret = parse_header(text);
+        if (ret == BAD_REQUEST) {
+          return BAD_REQUEST;
+        }
+        if (ret == GET_REQUEST) {
+          return GET_REQUEST;
+        }
+        // We ignore other cases for now
+        break;
       }
-      if (ret == GET_REQUEST) {
-        return GET_REQUEST;
+      // Parse message body
+      case CHECK_STATE_CONTENT: {
+        ret = parse_content();
+        /* TODO */
+        break;
       }
-      // We ignore other cases for now
-      break;
-    }
-    // Parse message body
-    case CHECK_STATE_CONTENT: {
-      ret = parse_content();
-      /* TODO */
-      break;
-    }
-    default: {
-      return INTERNAL_ERROR;
-    }
+      default: {
+        return INTERNAL_ERROR;
+      }
     }
   }
   return NO_REQUEST;
@@ -197,85 +198,90 @@ auto HttpConn::process_read() -> HTTP_CODE {
 // Process the write operation
 auto HttpConn::process_write(HTTP_CODE ret) -> bool {
   switch (ret) {
-  case INTERNAL_ERROR: {
-    const char *body =
-        "<html><head><title>500 Internal Server Error</title></head>"
-        "<body><h1>Internal Server Error</h1></body></html>";
-    if (!add_response("HTTP/1.1 500 Internal Server Error\r\n"
-                      "Content-Length: %d\r\n"
-                      "Content-Type: text/html\r\n"
-                      "Connection: close\r\n"
-                      "\r\n",
-                      static_cast<int>(strlen(body)))) {
-      return false;
-    }
-    return add_response("%s", body);
-  }
-  case BAD_REQUEST: {
-    const char *body = "<html><head><title>400 Bad Request</title></head>"
-                       "<body><h1>Bad Request</h1></body></html>";
-    if (!add_response("HTTP/1.1 400 Bad Request\r\n"
-                      "Content-Length: %d\r\n"
-                      "Content-Type: text/html\r\n"
-                      "Connection: close\r\n"
-                      "\r\n",
-                      static_cast<int>(strlen(body)))) {
-      return false;
-    }
-    return add_response("%s", body);
-  }
-  case FORBIDDEN_REQUEST: {
-    const char *body = "<html><head><title>403 Forbidden</title></head>"
-                       "<body><h1>Forbidden</h1></body></html>";
-    if (!add_response("HTTP/1.1 403 Forbidden\r\n"
-                      "Content-Length: %d\r\n"
-                      "Content-Type: text/html\r\n"
-                      "Connection: close\r\n"
-                      "\r\n",
-                      static_cast<int>(strlen(body)))) {
-      return false;
-    }
-    return add_response("%s", body);
-  }
-  case NO_RESOURCE: {
-    const char *body = "<html><head><title>404 Not Found</title></head>"
-                       "<body><h1>Not Found</h1></body></html>";
-    if (!add_response("HTTP/1.1 404 Not Found\r\n"
-                      "Content-Length: %d\r\n"
-                      "Content-Type: text/html\r\n"
-                      "Connection: close\r\n"
-                      "\r\n",
-                      static_cast<int>(strlen(body)))) {
-      return false;
-    }
-    return add_response("%s", body);
-  }
-  case GET_REQUEST: {
-    // Simple successful response for GET (small test response)
-    const char *body = "<html><body><h1>It works!</h1></body></html>";
-    if (!add_response("HTTP/1.1 200 OK\r\n"
-                      "Content-Length: %d\r\n"
-                      "Content-Type: text/html\r\n"
-                      "Connection: %s\r\n"
-                      "\r\n",
-                      static_cast<int>(strlen(body)),
-                      (linger_ ? "keep-alive" : "close"))) {
-      return false;
-    }
-    return add_response("%s", body);
-  }
-  case FILE_REQUEST: {
-    // Headers only; file body will be sent separately (e.g. via mmap/sendfile)
-    return add_response("HTTP/1.1 200 OK\r\n"
+    case INTERNAL_ERROR: {
+      const char* body =
+          "<html><head><title>500 Internal Server Error</title></head>"
+          "<body><h1>Internal Server Error</h1></body></html>";
+      if (!add_response("HTTP/1.1 500 Internal Server Error\r\n"
                         "Content-Length: %d\r\n"
-                        "Content-Type: application/octet-stream\r\n"
+                        "Content-Type: text/html\r\n"
+                        "Connection: close\r\n"
+                        "\r\n",
+                        static_cast<int>(strlen(body)))) {
+        return false;
+      }
+      return add_response("%s", body);
+    }
+    case BAD_REQUEST: {
+      const char* body =
+          "<html><head><title>400 Bad Request</title></head>"
+          "<body><h1>Bad Request</h1></body></html>";
+      if (!add_response("HTTP/1.1 400 Bad Request\r\n"
+                        "Content-Length: %d\r\n"
+                        "Content-Type: text/html\r\n"
+                        "Connection: close\r\n"
+                        "\r\n",
+                        static_cast<int>(strlen(body)))) {
+        return false;
+      }
+      return add_response("%s", body);
+    }
+    case FORBIDDEN_REQUEST: {
+      const char* body =
+          "<html><head><title>403 Forbidden</title></head>"
+          "<body><h1>Forbidden</h1></body></html>";
+      if (!add_response("HTTP/1.1 403 Forbidden\r\n"
+                        "Content-Length: %d\r\n"
+                        "Content-Type: text/html\r\n"
+                        "Connection: close\r\n"
+                        "\r\n",
+                        static_cast<int>(strlen(body)))) {
+        return false;
+      }
+      return add_response("%s", body);
+    }
+    case NO_RESOURCE: {
+      const char* body =
+          "<html><head><title>404 Not Found</title></head>"
+          "<body><h1>Not Found</h1></body></html>";
+      if (!add_response("HTTP/1.1 404 Not Found\r\n"
+                        "Content-Length: %d\r\n"
+                        "Content-Type: text/html\r\n"
+                        "Connection: close\r\n"
+                        "\r\n",
+                        static_cast<int>(strlen(body)))) {
+        return false;
+      }
+      return add_response("%s", body);
+    }
+    case GET_REQUEST: {
+      // Simple successful response for GET (small test response)
+      const char* body = "<html><body><h1>It works!</h1></body></html>";
+      if (!add_response("HTTP/1.1 200 OK\r\n"
+                        "Content-Length: %d\r\n"
+                        "Content-Type: text/html\r\n"
                         "Connection: %s\r\n"
                         "\r\n",
-                        file_stat_, (linger_ ? "keep-alive" : "close"));
-  }
-  default: {
-    return false;
-  }
+                        static_cast<int>(strlen(body)),
+                        (linger_ ? "keep-alive" : "close"))) {
+        return false;
+      }
+      return add_response("%s", body);
+    }
+    case FILE_REQUEST: {
+      // Headers only; file body will be sent separately (e.g. via
+      // mmap/sendfile)
+      return add_response(
+          "HTTP/1.1 200 OK\r\n"
+          "Content-Length: %d\r\n"
+          "Content-Type: application/octet-stream\r\n"
+          "Connection: %s\r\n"
+          "\r\n",
+          file_stat_, (linger_ ? "keep-alive" : "close"));
+    }
+    default: {
+      return false;
+    }
   }
 }
 
@@ -283,17 +289,16 @@ auto HttpConn::process_write(HTTP_CODE ret) -> bool {
 auto HttpConn::parse_line() -> LINE_STATUS {
   char tmp;
   for (; checked_idx_ < read_idx_; ++checked_idx_) {
-
     tmp = read_buf_[checked_idx_];
     // Find \r, check whether read a complete line
     if (tmp == '\r') {
       // Reached the end of the buffer without \n
       if ((checked_idx_ + 1) == read_idx_) {
-        return LINE_OPEN; // Need to read more
+        return LINE_OPEN;  // Need to read more
       }
       // Next character is \n, line is complete
       if (read_buf_[checked_idx_ + 1] == '\n') {
-        read_buf_[checked_idx_++] = '\0'; // For convenience
+        read_buf_[checked_idx_++] = '\0';  // For convenience
         read_buf_[checked_idx_++] = '\0';
         return LINE_OK;
       }
@@ -317,7 +322,7 @@ auto HttpConn::parse_line() -> LINE_STATUS {
 }
 
 // Parse the HTTP request line
-auto HttpConn::parse_request(char *text) -> HTTP_CODE {
+auto HttpConn::parse_request(char* text) -> HTTP_CODE {
   int start = 0;
   int end = 0;
   // Parse method
@@ -327,7 +332,7 @@ auto HttpConn::parse_request(char *text) -> HTTP_CODE {
       if (method == "GET") {
         method_ = GET;
       } else {
-        return BAD_REQUEST; // We only support GET for now
+        return BAD_REQUEST;  // We only support GET for now
       }
       break;
     }
@@ -360,7 +365,7 @@ auto HttpConn::parse_request(char *text) -> HTTP_CODE {
       if (version == "HTTP/1.1") {
         version_ = 1;
       } else {
-        return BAD_REQUEST; // We only support HTTP/1.1 for now
+        return BAD_REQUEST;  // We only support HTTP/1.1 for now
       }
       break;
     }
@@ -371,12 +376,12 @@ auto HttpConn::parse_request(char *text) -> HTTP_CODE {
     return BAD_REQUEST;
   }
 
-  check_state_ = CHECK_STATE_HEADER; // Move to header parsing state
-  return NO_REQUEST;                 // Successfully parsed request line
+  check_state_ = CHECK_STATE_HEADER;  // Move to header parsing state
+  return NO_REQUEST;                  // Successfully parsed request line
 }
 
 // Parse HTTP headers
-auto HttpConn::parse_header(char *text) -> HTTP_CODE {
+auto HttpConn::parse_header(char* text) -> HTTP_CODE {
   // An empty line indicates the end of headers
   if (text[0] == '\0') {
     // If there's no content, we have a complete request
@@ -400,7 +405,7 @@ auto HttpConn::parse_header(char *text) -> HTTP_CODE {
   } else {
     // Other headers are ignored for now
   }
-  return NO_REQUEST; // Need to read more
+  return NO_REQUEST;  // Need to read more
 }
 
 // Parse the HTTP message body
@@ -411,7 +416,7 @@ auto HttpConn::parse_content() -> HTTP_CODE {
 }
 
 // Add response data to the write buffer
-auto HttpConn::add_response(const char *format, ...) -> bool {
+auto HttpConn::add_response(const char* format, ...) -> bool {
   if (static_cast<size_t>(write_idx_) >= sizeof(write_buf_)) {
     return false;
   }
@@ -467,7 +472,9 @@ void HttpConn::mod_fd(int interest_fd, NetEvent ev) {
   }
 
   struct kevent event;
-  EV_SET(&event, interest_fd, filter, EV_ADD | EV_ENABLE | EV_CLEAR | EV_ONESHOT, 0, 0, (void *)(intptr_t)interest_fd);
-  kevent(kq_, &event, 1, nullptr, 0, nullptr); 
+  EV_SET(&event, interest_fd, filter,
+         EV_ADD | EV_ENABLE | EV_CLEAR | EV_ONESHOT, 0, 0,
+         (void*)(intptr_t)interest_fd);
+  kevent(kq_, &event, 1, nullptr, 0, nullptr);
 }
 #endif

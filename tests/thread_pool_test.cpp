@@ -1,4 +1,5 @@
 #include "pool/thread_pool.hpp"
+
 #include <atomic>
 #include <iostream>
 
@@ -18,7 +19,8 @@ auto main() -> int {
       });
     }
     // Let destructor wait for tasks to finish when pool goes out of scope
-    std::cout << "\n\n---------------Main thread done-----------------------\n\n";
+    std::cout
+        << "\n\n---------------Main thread done-----------------------\n\n";
   }
 
   if (counter.load(std::memory_order_relaxed) == TASKS_NUMBER) {
