@@ -22,6 +22,12 @@
 #include <netinet/in.h>
 
 #include <string>
+#include <string_view>
+
+namespace my_web_server {
+
+constexpr size_t kReadBufferSize = 2048;
+constexpr size_t kWriteBufferSize = 1024;
 
 // Class to handle HTTP connections
 class HttpConn {
@@ -46,7 +52,7 @@ class HttpConn {
   };
   // Sub state machine states
   enum LINE_STATUS { LINE_OK = 0, LINE_BAD, LINE_OPEN };
-  // HTTP response codes
+
   enum HTTP_CODE {
     NO_REQUEST = 0,     // request not complete yet, continue reading
     GET_REQUEST,        // got a complete request (200)
@@ -83,8 +89,7 @@ class HttpConn {
   auto parse_line() -> LINE_STATUS;        // Find a complete line
   // Process the write operation
   auto process_write(HTTP_CODE ret) -> bool;
-  auto add_response(const char* format, ...)
-      -> bool;  // Add response to write buffer
+  auto add_response(std::string_view text) -> bool;   // Add response to write buffer
 
   // Utility functions for epoll
   auto set_nonblocking(int interest_fd) -> int;
@@ -92,34 +97,36 @@ class HttpConn {
   // auto add_fd(int interest_fd, bool one_shot) -> void;
   // auto remove_fd(int interest_fd) -> void;
 
-  int sockfd_ = -1;  // socket file descriptor
+  int sockfd_{-1};  // socket file descriptor
 #if defined(__linux__)
-  int epollfd_ = -1;  // epoll file descriptor
+  int epollfd_{-1};  // epoll file descriptor
 #elif defined(__APPLE__)
-  int kq_;
+  int kq_{-1};
 #endif
   sockaddr_in address_;  // client address
 
-  char read_buf_[2048];  // read buffer
-  int read_idx_ = 0;     // index of the next byte to read
-  int checked_idx_ = 0;  // index of the byte being analyzed
-  int start_line_ = 0;   // start index of the current line being parsed
+  char read_buf_[kReadBufferSize];  // read buffer
+  int read_idx_{0};     // index of the next byte to read
+  int checked_idx_{0};  // index of the byte being analyzed
+  int start_line_{0};   // start index of the current line to be parsed
 
-  char write_buf_[1024];  // write buffer
-  int write_idx_ = 0;     // index of the next byte to write
+  char write_buf_[kWriteBufferSize];  // write buffer
+  int write_idx_{0};     // index of the next byte to write
 
-  int version_ = 0;      // HTTP version
+  int version_{0};      // HTTP version
   std::string url_{};    // request URL
   std::string host_{};   // Host header value
-  bool linger_ = false;  // whether to keep the connection alive
+  bool linger_{false};  // whether to keep the connection alive
 
   METHOD method_;            // request method
-  CHECK_STATE check_state_;  // main state machine current state
-  LINE_STATUS line_status_;  // line parsing status
+  CHECK_STATE check_state_{CHECK_STATE_REQUESTLINE};  // main state machine current state
+  LINE_STATUS line_status_{LINE_OK};  // line parsing status
 
-  char* file_address_ = nullptr;  // requested file address
-  int file_stat_ = 0;             // file status
+  char* file_address_{nullptr};  // requested file address
+  int file_stat_{0};             // file status
 };
+
+}  // namespace my_web_server
 
 /* HTTP Request message structure
 Request Line:        METHOD URL VERSION\r\n

@@ -52,7 +52,7 @@ int main() {
     return 1;
   }
 
-  HttpConn conn;
+  my_web_server::HttpConn conn;
   sockaddr_in dummy{};
 
   // Add sv[0] to epoll

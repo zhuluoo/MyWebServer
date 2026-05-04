@@ -15,24 +15,15 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-// File overview: Entry point that validates args and runs WebServer.
+// File overview: Declares resource directory resolution utilities.
 
-#include <iostream>
+#pragma once
 
-#include "server/web_server.hpp"
+#include <filesystem>
 
-auto main(int argc, char* argv[]) -> int {
-  if (argc != 3) {
-    std::cerr << "Usage: " << argv[0] << " ip_address port_number\n";
-    return 1;
-  }
-  int port = std::stoi(argv[2]);
-  if (port <= 1024 || port >= 65536) {
-    std::cerr << "Port number must be between 1025 and 65535\n";
-    return 1;
-  }
+namespace my_web_server {
 
-  my_web_server::WebServer server(argv[1], port);
-  server.run();
-  return 0;
-}
+// Resolve the resource directory next to the executable.
+auto resource_dir() -> const std::filesystem::path&;
+
+}  // namespace my_web_server

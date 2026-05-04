@@ -15,7 +15,8 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-// File overview: Defines WebServer for accepting and dispatching HTTP connections.
+// File overview: Defines WebServer for accepting and dispatching HTTP
+// connections.
 
 #pragma once
 
@@ -24,13 +25,16 @@
 
 #include "http/http_conn.hpp"
 
-constexpr int MAX_EVENTS = 10000;
+namespace my_web_server {
+
+constexpr int kMaxEvents = 10000;
+constexpr int kDefaultMaxConns = 1000;
 
 class ThreadPool;
 
 class WebServer {
  public:
-  WebServer(const char* ip, int port, std::size_t max_conn = 1000,
+  WebServer(const char* ip, int port, std::size_t max_conn = kDefaultMaxConns,
             std::size_t thread_num = 8);
   ~WebServer();
   WebServer(const WebServer&) = delete;
@@ -61,3 +65,5 @@ class WebServer {
 
   std::unique_ptr<ThreadPool> thread_pool_;
 };
+
+}  // namespace my_web_server

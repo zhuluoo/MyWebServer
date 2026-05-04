@@ -1,4 +1,4 @@
 build/
+build_xcode/
 bin/
-*.o
 .vscode/

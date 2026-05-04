@@ -28,6 +28,8 @@
 #include <thread>
 #include <vector>
 
+namespace my_web_server {
+
 class ThreadPool {
  public:
   explicit ThreadPool(size_t thread_num = 8);
@@ -51,7 +53,6 @@ class ThreadPool {
   std::shared_ptr<Pool> pool_;
 };
 
-// Add a new task to the thread pool
 template <typename F>
 void ThreadPool::add_task(F&& task) {
   std::unique_lock<std::mutex> lock(pool_->mtx);
@@ -60,6 +61,7 @@ void ThreadPool::add_task(F&& task) {
   }
   pool_->tasks.emplace(std::forward<F>(task));
   lock.unlock();
-  // Notify one worker thread that a new task is available
   pool_->cond.notify_one();
 }
+
+}  // namespace my_web_server

@@ -22,8 +22,8 @@
 #include <fcntl.h>
 
 #include <cerrno>
-#include <cstdarg>
 #include <cstring>
+#include <fstream>
 #if defined(__linux__)
 #include <sys/epoll.h>
 #elif defined(__APPLE__)
@@ -31,17 +31,80 @@
 #endif
 #include <sys/socket.h>
 #include <unistd.h>
+#include <format>
 
-// Constructor
+#include "utils/resource_utils.hpp"
+
+namespace my_web_server {
+
+namespace {
+constexpr std::string_view kHeader500Empty =
+  "HTTP/1.1 500 Internal Server Error\r\n"
+  "Content-Length: 0\r\n"
+  "Content-Type: text/html\r\n"
+  "Connection: close\r\n"
+  "\r\n";
+constexpr std::string_view kHeader500 =
+  "HTTP/1.1 500 Internal Server Error\r\n"
+  "Content-Length: {}\r\n"
+  "Content-Type: text/html\r\n"
+  "Connection: close\r\n"
+  "\r\n";
+constexpr std::string_view kHeader400 =
+  "HTTP/1.1 400 Bad Request\r\n"
+  "Content-Length: {}\r\n"
+  "Content-Type: text/html\r\n"
+  "Connection: close\r\n"
+  "\r\n";
+constexpr std::string_view kHeader403 =
+  "HTTP/1.1 403 Forbidden\r\n"
+  "Content-Length: {}\r\n"
+  "Content-Type: text/html\r\n"
+  "Connection: close\r\n"
+  "\r\n";
+constexpr std::string_view kHeader404 =
+  "HTTP/1.1 404 Not Found\r\n"
+  "Content-Length: {}\r\n"
+  "Content-Type: text/html\r\n"
+  "Connection: close\r\n"
+  "\r\n";
+constexpr std::string_view kHeader200 =
+  "HTTP/1.1 200 OK\r\n"
+  "Content-Length: {}\r\n"
+  "Content-Type: text/html\r\n"
+  "Connection: {}\r\n"
+  "\r\n";
+constexpr std::string_view kHeader200File =
+  "HTTP/1.1 200 OK\r\n"
+  "Content-Length: {}\r\n"
+  "Content-Type: application/octet-stream\r\n"
+  "Connection: {}\r\n"
+  "\r\n";
+auto load_body(const char* path, std::string* out) -> bool {
+  std::ifstream file(path, std::ios::in | std::ios::binary | std::ios::ate);
+  if (!file.is_open()) {
+    return false;
+  }
+  auto size = file.tellg();
+  file.seekg(0, std::ios::beg);
+  if (size <= 0) {
+    return false;
+  }
+  out->resize(size);
+  if (file.read(out->data(), size)) {
+    return true;
+  }
+  return false;
+}
+}  // namespace
+
 HttpConn::HttpConn() {
   memset(read_buf_, '\0', sizeof(read_buf_));
   memset(write_buf_, '\0', sizeof(write_buf_));
 }
 
-// Destructor
 HttpConn::~HttpConn() = default;
 
-// Initialize the HTTP connection
 void HttpConn::init() {
   memset(read_buf_, '\0', sizeof(read_buf_));
   read_idx_ = 0;
@@ -93,7 +156,6 @@ void HttpConn::process() {
 
 // Read available data from the socket (non-blocking ET loop)
 auto HttpConn::read() -> bool {
-  // Protect against overflowing the read buffer
   if (read_idx_ >= static_cast<int>(sizeof(read_buf_) - 1)) {
     return false;  // buffer full -> treat as error
   }
@@ -106,29 +168,28 @@ auto HttpConn::read() -> bool {
     if (bytes_read == -1) {
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
         // No more data for now
-        break;
+        return true;
       }
-      // Other socket error
       return false;
-    } else if (bytes_read == 0) {
-      // Client closed connection
+    }
+
+    // Client closed connection
+    if (bytes_read == 0) {
       return false;
     }
 
     read_idx_ += static_cast<int>(bytes_read);
-    // Ensure we don't overflow the buffer
+    // Buffer overflow
     if (read_idx_ >= static_cast<int>(sizeof(read_buf_) - 1)) {
       return false;
     }
   }
-
-  return true;
 }
 
 // Send the prepared response to the client (non-blocking ET loop)
 auto HttpConn::write() -> bool {
+  // Write process failed, close connection
   if (write_idx_ == -1) {
-    // Write process failed, close connection
     return false;
   }
   ssize_t bytes_written = 0;
@@ -144,23 +205,21 @@ auto HttpConn::write() -> bool {
         mod_fd(sockfd_, NetEvent::WRITE_EVENT);
         return true;  // Keep connection alive for retry
       }
-      // Other socket error
       return false;
     }
+
+    // Connection closed
     if (bytes_written == 0) {
-      // Connection closed
       return false;
     }
-    // Update total bytes written
+
     total_bytes_written += bytes_written;
   }
 
-  // All data has been sent successfully
-  // If connection is not persistent, close it
   if (!linger_) {
     return false;  // Indicate to close connection
   }
-  // Keep-alive: reset state for next request and re-arm for reading
+
   init();
   mod_fd(sockfd_, NetEvent::READ_EVENT);
   return true;
@@ -168,18 +227,14 @@ auto HttpConn::write() -> bool {
 
 // Handle the HTTP connection
 auto HttpConn::process_read() -> HTTP_CODE {
-  line_status_ = LINE_OK;
+  line_status_ = parse_line();
   HTTP_CODE ret = NO_REQUEST;
   char* text = nullptr;
   // Main state machine loop
-  while ((check_state_ == CHECK_STATE_CONTENT && line_status_ == LINE_OK) ||
-         ((line_status_ = parse_line()) == LINE_OK)) {
-    // Get the start line
+  while (line_status_ == LINE_OK) {
     text = read_buf_ + start_line_;
-    // Update start_line_ to the next line
     start_line_ = checked_idx_;
     switch (check_state_) {
-        // Parse request line
       case CHECK_STATE_REQUESTLINE: {
         ret = parse_request(text);
         if (ret == BAD_REQUEST) {
@@ -187,7 +242,7 @@ auto HttpConn::process_read() -> HTTP_CODE {
         }
         break;
       }
-      // Parse headers
+
       case CHECK_STATE_HEADER: {
         ret = parse_header(text);
         if (ret == BAD_REQUEST) {
@@ -199,150 +254,140 @@ auto HttpConn::process_read() -> HTTP_CODE {
         // We ignore other cases for now
         break;
       }
-      // Parse message body
+
       case CHECK_STATE_CONTENT: {
         ret = parse_content();
         /* TODO */
         break;
       }
+
       default: {
         return INTERNAL_ERROR;
       }
     }
+
+    line_status_ = parse_line();
   }
   return NO_REQUEST;
 }
 
 // Process the write operation
 auto HttpConn::process_write(HTTP_CODE ret) -> bool {
+  auto add_server_error = [&]() -> bool {
+    linger_ = false; // Close connection
+    return add_response(kHeader500Empty);
+  };
+
   switch (ret) {
     case INTERNAL_ERROR: {
-      const char* body =
-          "<html><head><title>500 Internal Server Error</title></head>"
-          "<body><h1>Internal Server Error</h1></body></html>";
-      if (!add_response("HTTP/1.1 500 Internal Server Error\r\n"
-                        "Content-Length: %d\r\n"
-                        "Content-Type: text/html\r\n"
-                        "Connection: close\r\n"
-                        "\r\n",
-                        static_cast<int>(strlen(body)))) {
+      std::string body;
+      auto path = (resource_dir() / "html" / "500.html").string();
+      if (!load_body(path.c_str(), &body)) {
+        return add_server_error();
+      }
+      if (!add_response(std::format(kHeader500, body.size()))) {
         return false;
       }
-      return add_response("%s", body);
+      return add_response(body);
     }
+
     case BAD_REQUEST: {
-      const char* body =
-          "<html><head><title>400 Bad Request</title></head>"
-          "<body><h1>Bad Request</h1></body></html>";
-      if (!add_response("HTTP/1.1 400 Bad Request\r\n"
-                        "Content-Length: %d\r\n"
-                        "Content-Type: text/html\r\n"
-                        "Connection: close\r\n"
-                        "\r\n",
-                        static_cast<int>(strlen(body)))) {
+      std::string body;
+      auto path = (resource_dir() / "html" / "400.html").string();
+      if (!load_body(path.c_str(), &body)) {
+        return add_server_error();
+      }
+      if (!add_response(std::format(kHeader400, body.size()))) {
         return false;
       }
-      return add_response("%s", body);
+      return add_response(body);
     }
+
     case FORBIDDEN_REQUEST: {
-      const char* body =
-          "<html><head><title>403 Forbidden</title></head>"
-          "<body><h1>Forbidden</h1></body></html>";
-      if (!add_response("HTTP/1.1 403 Forbidden\r\n"
-                        "Content-Length: %d\r\n"
-                        "Content-Type: text/html\r\n"
-                        "Connection: close\r\n"
-                        "\r\n",
-                        static_cast<int>(strlen(body)))) {
+      std::string body;
+      auto path = (resource_dir() / "html" / "403.html").string();
+      if (!load_body(path.c_str(), &body)) {
+        return add_server_error();
+      }
+      if (!add_response(std::format(kHeader403, body.size()))) {
         return false;
       }
-      return add_response("%s", body);
+      return add_response(body);
     }
+
     case NO_RESOURCE: {
-      const char* body =
-          "<html><head><title>404 Not Found</title></head>"
-          "<body><h1>Not Found</h1></body></html>";
-      if (!add_response("HTTP/1.1 404 Not Found\r\n"
-                        "Content-Length: %d\r\n"
-                        "Content-Type: text/html\r\n"
-                        "Connection: close\r\n"
-                        "\r\n",
-                        static_cast<int>(strlen(body)))) {
+      std::string body;
+      auto path = (resource_dir() / "html" / "404.html").string();
+      if (!load_body(path.c_str(), &body)) {
+        return add_server_error();
+      }
+      if (!add_response(std::format(kHeader404, body.size()))) {
         return false;
       }
-      return add_response("%s", body);
+      return add_response(body);
     }
+
     case GET_REQUEST: {
-      // Simple successful response for GET (small test response)
-      const char* body = "<html><body><h1>It works!</h1></body></html>";
-      if (!add_response("HTTP/1.1 200 OK\r\n"
-                        "Content-Length: %d\r\n"
-                        "Content-Type: text/html\r\n"
-                        "Connection: %s\r\n"
-                        "\r\n",
-                        static_cast<int>(strlen(body)),
-                        (linger_ ? "keep-alive" : "close"))) {
+      std::string body;
+      auto path = (resource_dir() / "html" / "200.html").string();
+      if (!load_body(path.c_str(), &body)) {
+        return add_server_error();
+      }
+      if (!add_response(std::format(kHeader200, body.size(),
+                         (linger_ ? "keep-alive" : "close")))) {
         return false;
       }
-      return add_response("%s", body);
+      return add_response(body);
     }
+
     case FILE_REQUEST: {
       // Headers only; file body will be sent separately (e.g. via
       // mmap/sendfile)
-      return add_response(
-          "HTTP/1.1 200 OK\r\n"
-          "Content-Length: %d\r\n"
-          "Content-Type: application/octet-stream\r\n"
-          "Connection: %s\r\n"
-          "\r\n",
-          file_stat_, (linger_ ? "keep-alive" : "close"));
+      return add_response(std::format(kHeader200File, file_stat_,
+               (linger_ ? "keep-alive" : "close")));
     }
+
     default: {
       return false;
     }
   }
 }
 
-// Parse a line and determine its status
+// Parse a line and determine its status (Search \r\n)
 auto HttpConn::parse_line() -> LINE_STATUS {
   char tmp;
   for (; checked_idx_ < read_idx_; ++checked_idx_) {
     tmp = read_buf_[checked_idx_];
-    // Find \r, check whether read a complete line
     if (tmp == '\r') {
-      // Reached the end of the buffer without \n
       if ((checked_idx_ + 1) == read_idx_) {
-        return LINE_OPEN;  // Need to read more
+        return LINE_OPEN;
       }
-      // Next character is \n, line is complete
+
       if (read_buf_[checked_idx_ + 1] == '\n') {
         read_buf_[checked_idx_++] = '\0';  // For convenience
         read_buf_[checked_idx_++] = '\0';
         return LINE_OK;
       }
-      // Isolated \r
       return LINE_BAD;
     }
-    // Found \n, check if preceded by \r
+
     if (tmp == '\n') {
       if (checked_idx_ > 0 && read_buf_[checked_idx_ - 1] == '\r') {
         read_buf_[checked_idx_ - 1] = '\0';
         read_buf_[checked_idx_++] = '\0';
         return LINE_OK;
       }
-      // Isolated \n
       return LINE_BAD;
     }
   }
 
-  // No complete line found yet
   return LINE_OPEN;
 }
 
-// Parse the HTTP request line
 auto HttpConn::parse_request(char* text) -> HTTP_CODE {
   int start = 0;
   int end = 0;
+  version_ = 0;
   // Parse method
   while (text[end] != '\0') {
     if (text[end] == ' ') {
@@ -356,7 +401,7 @@ auto HttpConn::parse_request(char* text) -> HTTP_CODE {
     }
     ++end;
   }
-  // Not enough information
+
   if (text[end] == '\0') {
     return BAD_REQUEST;
   }
@@ -370,7 +415,7 @@ auto HttpConn::parse_request(char* text) -> HTTP_CODE {
     }
     ++end;
   }
-  // Not enough information
+
   if (text[end] == '\0') {
     return BAD_REQUEST;
   }
@@ -389,35 +434,46 @@ auto HttpConn::parse_request(char* text) -> HTTP_CODE {
     }
     ++end;
   }
-  // Not enough information
-  if (text[end] == '\0' && text[end - 1] == ' ') {
+
+  if (version_ == 0) {
     return BAD_REQUEST;
   }
 
-  check_state_ = CHECK_STATE_HEADER;  // Move to header parsing state
-  return NO_REQUEST;                  // Successfully parsed request line
+  check_state_ = CHECK_STATE_HEADER;
+  return NO_REQUEST;
 }
 
-// Parse HTTP headers
 auto HttpConn::parse_header(char* text) -> HTTP_CODE {
+  // \r\n replaced to \0 during parsing
+  std::string_view line(text);
   // An empty line indicates the end of headers
-  if (text[0] == '\0') {
-    // If there's no content, we have a complete request
+  if (line.empty()) {
     return GET_REQUEST;
   }
-  // Parse individual headers
-  if (strncasecmp(text, "Host:", 5) == 0) {
-    text += 5;
-    while (*text == ' ') {
-      ++text;
-    }
-    host_ = std::string(text);
-  } else if (strncasecmp(text, "Connection:", 11) == 0) {
-    text += 11;
-    while (*text == ' ') {
-      ++text;
-    }
-    if (strcasecmp(text, "keep-alive") == 0) {
+
+  auto colon_idx = line.find(':');
+  if (colon_idx == std::string_view::npos) {
+    return BAD_REQUEST;
+  }
+
+  std::string_view key = line.substr(0, colon_idx);
+  std::string_view value = line.substr(colon_idx + 1);
+  while (!value.empty() && value.front() == ' ') {
+    value.remove_prefix(1);
+  }
+
+  auto is_equal_ncase = [](std::string_view s1, std::string_view s2) {
+    return s1.size() == s2.size() &&
+           std::equal(s1.begin(), s1.end(), s2.begin(), [](char a, char b) {
+             return std::tolower(static_cast<unsigned char>(a)) ==
+                    std::tolower(static_cast<unsigned char>(b));
+           });
+  };
+
+  if (is_equal_ncase(key, "Host")) {
+    host_ = std::string(value);
+  } else if (is_equal_ncase(key, "Connection")) {
+    if (is_equal_ncase(value, "keep-alive")) {
       linger_ = true;
     }
   } else {
@@ -434,22 +490,16 @@ auto HttpConn::parse_content() -> HTTP_CODE {
 }
 
 // Add response data to the write buffer
-auto HttpConn::add_response(const char* format, ...) -> bool {
-  if (static_cast<size_t>(write_idx_) >= sizeof(write_buf_)) {
+auto HttpConn::add_response(std::string_view text) -> bool {
+  if (write_idx_ < 0) {
     return false;
   }
-  va_list arg_list;
-  va_start(arg_list, format);
-  // Format the response and add it to the write buffer
-  int len = vsnprintf(write_buf_ + write_idx_,
-                      sizeof(write_buf_) - write_idx_ - 1, format, arg_list);
-  // Check for buffer overflow
-  if (static_cast<size_t>(len) >= (sizeof(write_buf_) - write_idx_ - 1)) {
-    va_end(arg_list);
+  size_t remaining = sizeof(write_buf_) - static_cast<size_t>(write_idx_);
+  if (text.size() > remaining) {
     return false;
   }
-  write_idx_ += len;
-  va_end(arg_list);
+  std::memcpy(write_buf_ + write_idx_, text.data(), text.size());
+  write_idx_ += static_cast<int>(text.size());
   return true;
 }
 
@@ -496,3 +546,5 @@ void HttpConn::mod_fd(int interest_fd, NetEvent ev) {
   kevent(kq_, &event, 1, nullptr, 0, nullptr);
 }
 #endif
+
+}  // namespace my_web_server

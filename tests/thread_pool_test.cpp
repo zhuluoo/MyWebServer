@@ -23,12 +23,12 @@
 #include <iostream>
 
 auto main() -> int {
-  constexpr int TASKS_NUMBER = 1000;
+  constexpr int kTasksNumber = 1000;
   std::atomic<int> counter{0};
 
   {
-    ThreadPool pool(8);
-    for (int i = 0; i < TASKS_NUMBER; ++i) {
+    my_web_server::ThreadPool pool(8);
+    for (int i = 0; i < kTasksNumber; ++i) {
       pool.add_task([&counter]() {
         int ctr = counter.fetch_add(1, std::memory_order_relaxed);
         std::cout << "Task " << ctr + 1
@@ -42,12 +42,12 @@ auto main() -> int {
         << "\n\n---------------Main thread done-----------------------\n\n";
   }
 
-  if (counter.load(std::memory_order_relaxed) == TASKS_NUMBER) {
-    std::cout << "PASS: all tasks executed (" << TASKS_NUMBER << ")\n";
+  if (counter.load(std::memory_order_relaxed) == kTasksNumber) {
+    std::cout << "PASS: all tasks executed (" << kTasksNumber << ")\n";
     return 0;
   }
 
-  std::cerr << "FAIL: executed " << counter.load() << " of " << TASKS_NUMBER
+  std::cerr << "FAIL: executed " << counter.load() << " of " << kTasksNumber
             << " tasks\n";
   return 1;
 }

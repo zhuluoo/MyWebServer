@@ -32,6 +32,8 @@
 #include "pool/thread_pool.hpp"
 #include "server/web_server.hpp"
 
+namespace my_web_server {
+
 WebServer::WebServer(const char* ip, int port, std::size_t max_conn,
                      std::size_t thread_num)
     : ip_(strdup(ip)), port_(port), max_conn_(max_conn) {
@@ -97,11 +99,11 @@ void WebServer::start_listening() {
 
 #if defined(__linux__)
 void WebServer::run() {
-  epoll_event events[MAX_EVENTS];
+  epoll_event events[kMaxEvents];
   start_listening();
   // Main event loop would go here
   while (true) {
-    int num_events = epoll_wait(epoll_fd_, events, MAX_EVENTS, -1);
+    int num_events = epoll_wait(epoll_fd_, events, kMaxEvents, -1);
     // error and not interrupted by signal
     if (num_events < 0 && errno != EINTR) {
       perror("Epoll wait error");
@@ -179,10 +181,10 @@ void WebServer::remove_fd(int interest_fd) {
 }
 #elif defined(__APPLE__)
 void WebServer::run() {
-  struct kevent events[MAX_EVENTS];
+  struct kevent events[kMaxEvents];
   start_listening();
   while (true) {
-    int num_events = kevent(kq_fd_, nullptr, 0, events, MAX_EVENTS, nullptr);
+    int num_events = kevent(kq_fd_, nullptr, 0, events, kMaxEvents, nullptr);
     // Error and not interrupted by signal
     if (num_events < 0 && errno != EINTR) {
       perror("Kqueue wait error");
@@ -278,3 +280,5 @@ auto WebServer::set_nonblocking(int interest_fd) -> int {
   fcntl(interest_fd, F_SETFL, new_option);
   return old_option;
 }
+
+}  // namespace my_web_server
