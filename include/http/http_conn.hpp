@@ -89,7 +89,8 @@ class HttpConn {
   auto parse_line() -> LINE_STATUS;        // Find a complete line
   // Process the write operation
   auto process_write(HTTP_CODE ret) -> bool;
-  auto add_response(std::string_view text) -> bool;   // Add response to write buffer
+  auto add_response(std::string_view text)
+      -> bool;  // Add response to write buffer
 
   // Utility functions for epoll
   auto set_nonblocking(int interest_fd) -> int;
@@ -106,20 +107,21 @@ class HttpConn {
   sockaddr_in address_;  // client address
 
   char read_buf_[kReadBufferSize];  // read buffer
-  int read_idx_{0};     // index of the next byte to read
-  int checked_idx_{0};  // index of the byte being analyzed
-  int start_line_{0};   // start index of the current line to be parsed
+  int read_idx_{0};                 // index of the next byte to read
+  int checked_idx_{0};              // index of the byte being analyzed
+  int start_line_{0};  // start index of the current line to be parsed
 
   char write_buf_[kWriteBufferSize];  // write buffer
-  int write_idx_{0};     // index of the next byte to write
+  int write_idx_{0};                  // index of the next byte to write
 
   int version_{0};      // HTTP version
-  std::string url_{};    // request URL
-  std::string host_{};   // Host header value
+  std::string url_{};   // request URL
+  std::string host_{};  // Host header value
   bool linger_{false};  // whether to keep the connection alive
 
-  METHOD method_;            // request method
-  CHECK_STATE check_state_{CHECK_STATE_REQUESTLINE};  // main state machine current state
+  METHOD method_;  // request method
+  CHECK_STATE check_state_{
+      CHECK_STATE_REQUESTLINE};       // main state machine current state
   LINE_STATUS line_status_{LINE_OK};  // line parsing status
 
   char* file_address_{nullptr};  // requested file address

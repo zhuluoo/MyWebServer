@@ -15,25 +15,32 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-// File overview: Entry point that validates args and runs WebServer.
+// File overview: Defines global, read-only server configuration.
 
-#include <format>
-#include <iostream>
+#pragma once
 
-#include "config/global_config.hpp"
-#include "server/web_server.hpp"
+#include <optional>
+#include <string>
 
-auto main(int argc, char* argv[]) -> int {
-  auto& config = my_web_server::GlobalConfig::Instance();
-  if (!config.InitFromArgs(argc, argv)) {
-    return 1;
-  }
+namespace my_web_server {
 
-  const auto& cfg = config.Get();
-  std::cout << std::format("Initializing web server at ip {} port {}.\n",
-                           cfg.ip, cfg.port);
+struct ServerConfig {
+  std::string ip{"127.0.0.1"};
+  int port{8001};
+  std::optional<std::string> http_200_return_text{};
+};
 
-  my_web_server::WebServer server(cfg.ip.c_str(), cfg.port);
-  server.run();
-  return 0;
-}
+class GlobalConfig {
+ public:
+  static auto Instance() -> GlobalConfig&;
+  auto InitFromArgs(int argc, char* argv[]) -> bool;
+  auto Get() const -> const ServerConfig&;
+
+ private:
+  GlobalConfig() = default;
+
+  ServerConfig config_{};
+  bool initialized_ = false;
+};
+
+}  // namespace my_web_server

@@ -3,8 +3,9 @@ add_executable(server.o)
 target_sources(server.o
   PRIVATE
     main.cpp
-    pool/thread_pool.cpp
+    config/global_config.cpp
     http/http_conn.cpp
+    pool/thread_pool.cpp
     server/web_server.cpp
     utils/resource_utils.cpp
 )

@@ -31,6 +31,7 @@
 #endif
 #include <sys/socket.h>
 #include <unistd.h>
+
 #include <format>
 
 #include "utils/resource_utils.hpp"
@@ -39,47 +40,47 @@ namespace my_web_server {
 
 namespace {
 constexpr std::string_view kHeader500Empty =
-  "HTTP/1.1 500 Internal Server Error\r\n"
-  "Content-Length: 0\r\n"
-  "Content-Type: text/html\r\n"
-  "Connection: close\r\n"
-  "\r\n";
+    "HTTP/1.1 500 Internal Server Error\r\n"
+    "Content-Length: 0\r\n"
+    "Content-Type: text/html\r\n"
+    "Connection: close\r\n"
+    "\r\n";
 constexpr std::string_view kHeader500 =
-  "HTTP/1.1 500 Internal Server Error\r\n"
-  "Content-Length: {}\r\n"
-  "Content-Type: text/html\r\n"
-  "Connection: close\r\n"
-  "\r\n";
+    "HTTP/1.1 500 Internal Server Error\r\n"
+    "Content-Length: {}\r\n"
+    "Content-Type: text/html\r\n"
+    "Connection: close\r\n"
+    "\r\n";
 constexpr std::string_view kHeader400 =
-  "HTTP/1.1 400 Bad Request\r\n"
-  "Content-Length: {}\r\n"
-  "Content-Type: text/html\r\n"
-  "Connection: close\r\n"
-  "\r\n";
+    "HTTP/1.1 400 Bad Request\r\n"
+    "Content-Length: {}\r\n"
+    "Content-Type: text/html\r\n"
+    "Connection: close\r\n"
+    "\r\n";
 constexpr std::string_view kHeader403 =
-  "HTTP/1.1 403 Forbidden\r\n"
-  "Content-Length: {}\r\n"
-  "Content-Type: text/html\r\n"
-  "Connection: close\r\n"
-  "\r\n";
+    "HTTP/1.1 403 Forbidden\r\n"
+    "Content-Length: {}\r\n"
+    "Content-Type: text/html\r\n"
+    "Connection: close\r\n"
+    "\r\n";
 constexpr std::string_view kHeader404 =
-  "HTTP/1.1 404 Not Found\r\n"
-  "Content-Length: {}\r\n"
-  "Content-Type: text/html\r\n"
-  "Connection: close\r\n"
-  "\r\n";
+    "HTTP/1.1 404 Not Found\r\n"
+    "Content-Length: {}\r\n"
+    "Content-Type: text/html\r\n"
+    "Connection: close\r\n"
+    "\r\n";
 constexpr std::string_view kHeader200 =
-  "HTTP/1.1 200 OK\r\n"
-  "Content-Length: {}\r\n"
-  "Content-Type: text/html\r\n"
-  "Connection: {}\r\n"
-  "\r\n";
+    "HTTP/1.1 200 OK\r\n"
+    "Content-Length: {}\r\n"
+    "Content-Type: text/html\r\n"
+    "Connection: {}\r\n"
+    "\r\n";
 constexpr std::string_view kHeader200File =
-  "HTTP/1.1 200 OK\r\n"
-  "Content-Length: {}\r\n"
-  "Content-Type: application/octet-stream\r\n"
-  "Connection: {}\r\n"
-  "\r\n";
+    "HTTP/1.1 200 OK\r\n"
+    "Content-Length: {}\r\n"
+    "Content-Type: application/octet-stream\r\n"
+    "Connection: {}\r\n"
+    "\r\n";
 auto load_body(const char* path, std::string* out) -> bool {
   std::ifstream file(path, std::ios::in | std::ios::binary | std::ios::ate);
   if (!file.is_open()) {
@@ -131,7 +132,7 @@ void HttpConn::init(int sockfd, const sockaddr_in& addr, int fd) {
   sockfd_ = sockfd;
   address_ = addr;
 #if defined(__linux__)
-  int epollfd_ = fd;  // epoll file descriptor
+  epollfd_ = fd;
 #elif defined(__APPLE__)
   kq_ = fd;
 #endif
@@ -274,7 +275,7 @@ auto HttpConn::process_read() -> HTTP_CODE {
 // Process the write operation
 auto HttpConn::process_write(HTTP_CODE ret) -> bool {
   auto add_server_error = [&]() -> bool {
-    linger_ = false; // Close connection
+    linger_ = false;  // Close connection
     return add_response(kHeader500Empty);
   };
 
@@ -334,7 +335,7 @@ auto HttpConn::process_write(HTTP_CODE ret) -> bool {
         return add_server_error();
       }
       if (!add_response(std::format(kHeader200, body.size(),
-                         (linger_ ? "keep-alive" : "close")))) {
+                                    (linger_ ? "keep-alive" : "close")))) {
         return false;
       }
       return add_response(body);
@@ -344,7 +345,7 @@ auto HttpConn::process_write(HTTP_CODE ret) -> bool {
       // Headers only; file body will be sent separately (e.g. via
       // mmap/sendfile)
       return add_response(std::format(kHeader200File, file_stat_,
-               (linger_ ? "keep-alive" : "close")));
+                                      (linger_ ? "keep-alive" : "close")));
     }
 
     default: {
@@ -513,11 +514,11 @@ auto HttpConn::set_nonblocking(int interest_fd) -> int {
 
 #if defined(__linux__)
 void HttpConn::mod_fd(int interest_fd, NetEvent ev) {
-  int event = -1;
+  int event_flags = -1;
   if (ev == NetEvent::READ_EVENT) {
-    event = EPOLLREAD;
+    event_flags = EPOLLREAD;
   } else if (ev == NetEvent::WRITE_EVENT) {
-    event = EPOLLOUT;
+    event_flags = EPOLLOUT;
   } else {
     return;
   }
@@ -525,7 +526,7 @@ void HttpConn::mod_fd(int interest_fd, NetEvent ev) {
   epoll_event event;
   event.data.fd = interest_fd;
   // Set new events while keeping ET, RDHUP, and ONESHOT flags
-  event.events = event | EPOLLET | EPOLLRDHUP | EPOLLONESHOT;
+  event.events = event_flags | EPOLLET | EPOLLRDHUP | EPOLLONESHOT;
   epoll_ctl(epollfd_, EPOLL_CTL_MOD, interest_fd, &event);
 }
 #elif defined(__APPLE__)

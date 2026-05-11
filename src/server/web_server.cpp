@@ -82,7 +82,8 @@ void WebServer::start_listening() {
   address.sin_port = htons(port_);
 
   int ret = 0;
-  ret = bind(listen_fd_, reinterpret_cast<sockaddr*>(&address), sizeof(address));
+  ret =
+      bind(listen_fd_, reinterpret_cast<sockaddr*>(&address), sizeof(address));
   if (ret == -1) {
     perror("Bind error");
     exit(EXIT_FAILURE);
