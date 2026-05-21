@@ -34,6 +34,7 @@
 
 #include <format>
 
+#include "config/global_config.hpp"
 #include "utils/resource_utils.hpp"
 
 namespace my_web_server {
@@ -42,37 +43,37 @@ namespace {
 constexpr std::string_view kHeader500Empty =
     "HTTP/1.1 500 Internal Server Error\r\n"
     "Content-Length: 0\r\n"
-    "Content-Type: text/html\r\n"
+    "Content-Type: text/html; charset=utf-8\r\n"
     "Connection: close\r\n"
     "\r\n";
 constexpr std::string_view kHeader500 =
     "HTTP/1.1 500 Internal Server Error\r\n"
     "Content-Length: {}\r\n"
-    "Content-Type: text/html\r\n"
+    "Content-Type: text/html; charset=utf-8\r\n"
     "Connection: close\r\n"
     "\r\n";
 constexpr std::string_view kHeader400 =
     "HTTP/1.1 400 Bad Request\r\n"
     "Content-Length: {}\r\n"
-    "Content-Type: text/html\r\n"
+    "Content-Type: text/html; charset=utf-8\r\n"
     "Connection: close\r\n"
     "\r\n";
 constexpr std::string_view kHeader403 =
     "HTTP/1.1 403 Forbidden\r\n"
     "Content-Length: {}\r\n"
-    "Content-Type: text/html\r\n"
+    "Content-Type: text/html; charset=utf-8\r\n"
     "Connection: close\r\n"
     "\r\n";
 constexpr std::string_view kHeader404 =
     "HTTP/1.1 404 Not Found\r\n"
     "Content-Length: {}\r\n"
-    "Content-Type: text/html\r\n"
+    "Content-Type: text/html; charset=utf-8\r\n"
     "Connection: close\r\n"
     "\r\n";
 constexpr std::string_view kHeader200 =
     "HTTP/1.1 200 OK\r\n"
     "Content-Length: {}\r\n"
-    "Content-Type: text/html\r\n"
+    "Content-Type: text/html; charset=utf-8\r\n"
     "Connection: {}\r\n"
     "\r\n";
 constexpr std::string_view kHeader200File =
@@ -81,6 +82,10 @@ constexpr std::string_view kHeader200File =
     "Content-Type: application/octet-stream\r\n"
     "Connection: {}\r\n"
     "\r\n";
+constexpr std::string_view kHtmlWrapFmt = "<html><body>\n{}</body></html>\n";
+constexpr std::string_view kPreFmt = "<pre>\n{}</pre>\n";
+constexpr std::string_view kDirErrorFmt = "[Failed to read directory: {}]\n";
+constexpr std::string_view kFileLinkFmt = "<a href=\"/{}\">{}</a>\n";
 auto load_body(const char* path, std::string* out) -> bool {
   std::ifstream file(path, std::ios::in | std::ios::binary | std::ios::ate);
   if (!file.is_open()) {
@@ -329,11 +334,39 @@ auto HttpConn::process_write(HTTP_CODE ret) -> bool {
     }
 
     case GET_REQUEST: {
+      const auto& cfg = GlobalConfig::Instance().Get();
       std::string body;
-      auto path = (resource_dir() / "html" / "200.html").string();
-      if (!load_body(path.c_str(), &body)) {
-        return add_server_error();
+
+      if (cfg.custom_response_text.has_value()) {
+        body += cfg.custom_response_text.value();
+        body += '\n';
       }
+
+      if (cfg.server_working_dir.has_value()) {
+        std::string listing;
+        try {
+          for (const auto& entry : std::filesystem::directory_iterator(
+                   cfg.server_working_dir.value())) {
+            if (entry.is_regular_file()) {
+              auto name = entry.path().filename().string();
+              listing += std::format(kFileLinkFmt, name, name);
+            }
+          }
+        } catch (const std::filesystem::filesystem_error& e) {
+          listing += std::format(kDirErrorFmt, e.what());
+        }
+        body += std::format(kPreFmt, listing);
+      }
+
+      if (body.empty()) {
+        auto path = (resource_dir() / "html" / "200.html").string();
+        if (!load_body(path.c_str(), &body)) {
+          return add_server_error();
+        }
+      } else {
+        body = std::format(kHtmlWrapFmt, body);
+      }
+
       if (!add_response(std::format(kHeader200, body.size(),
                                     (linger_ ? "keep-alive" : "close")))) {
         return false;

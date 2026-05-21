@@ -76,7 +76,22 @@ auto GlobalConfig::InitFromArgs(int argc, char* argv[]) -> bool {
         std::cerr << "No text specified.\n";
         return false;
       }
-      cfg.http_200_return_text = argv[++i];
+      cfg.custom_response_text = argv[++i];
+    } else if (para == "--dir") {
+      if (i + 1 >= argc) {
+        std::cerr << "No directory specified.\n";
+        return false;
+      }
+      std::string dir = argv[++i];
+      if (!dir.empty() && dir[0] == '~') {
+        auto home = std::getenv("HOME");
+        if (home == nullptr) {
+          std::cerr << "Fail to get home dir for '~'.\n";
+          return false;
+        }
+        dir = std::string(home) + dir.substr(1);
+      }
+      cfg.server_working_dir = dir;
     } else {
       std::cerr << std::format("Invalid parameter: {}\n", argv[i]);
       return false;
