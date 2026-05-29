@@ -21,6 +21,7 @@
 
 #include <netinet/in.h>
 
+#include <filesystem>
 #include <string>
 #include <string_view>
 
@@ -59,7 +60,6 @@ class HttpConn {
     BAD_REQUEST,        // malformed request (400)
     NO_RESOURCE,        // resource not found (404)
     FORBIDDEN_REQUEST,  // access forbidden (403)
-    FILE_REQUEST,       // file request successful (200)
     INTERNAL_ERROR,     // internal server error (500)
     CLOSED_CONNECTION   // connection closed by client
   };
@@ -87,16 +87,21 @@ class HttpConn {
   auto parse_header(char*) -> HTTP_CODE;   // For headers
   auto parse_content() -> HTTP_CODE;       // For message body
   auto parse_line() -> LINE_STATUS;        // Find a complete line
+
   // Process the write operation
   auto process_write(HTTP_CODE ret) -> bool;
+  auto write_internal_error() -> bool;
+  auto write_bad_request() -> bool;
+  auto write_forbidden_request() -> bool;
+  auto write_no_resource() -> bool;
+  auto write_get_request() -> bool;
+  auto write_server_error() -> bool;
   auto add_response(std::string_view text)
       -> bool;  // Add response to write buffer
 
   // Utility functions for epoll
   auto set_nonblocking(int interest_fd) -> int;
   void mod_fd(int interest_fd, NetEvent ev);
-  // auto add_fd(int interest_fd, bool one_shot) -> void;
-  // auto remove_fd(int interest_fd) -> void;
 
   int sockfd_{-1};  // socket file descriptor
 #if defined(__linux__)
@@ -124,8 +129,12 @@ class HttpConn {
       CHECK_STATE_REQUESTLINE};       // main state machine current state
   LINE_STATUS line_status_{LINE_OK};  // line parsing status
 
-  char* file_address_{nullptr};  // requested file address
-  int file_stat_{0};             // file status
+  off_t file_size_{0};        // size of file being served
+  int file_fd_{-1};           // fd of file being sent via sendfile
+  int write_buf_sent_{0};     // bytes sent from write_buf_
+  off_t file_bytes_sent_{0};  // bytes sent from file via sendfile
+
+  std::filesystem::path server_working_dir_{};  // cached working dir
 };
 
 }  // namespace my_web_server

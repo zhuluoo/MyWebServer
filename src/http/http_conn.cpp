@@ -21,11 +21,13 @@
 
 #include <fcntl.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <fstream>
 #if defined(__linux__)
 #include <sys/epoll.h>
+#include <sys/sendfile.h>
 #elif defined(__APPLE__)
 #include <sys/event.h>
 #endif
@@ -35,72 +37,20 @@
 #include <format>
 
 #include "config/global_config.hpp"
+#include "http/http_response_templates.hpp"
 #include "utils/resource_utils.hpp"
 
 namespace my_web_server {
 
 namespace {
-constexpr std::string_view kHeader500Empty =
-    "HTTP/1.1 500 Internal Server Error\r\n"
-    "Content-Length: 0\r\n"
-    "Content-Type: text/html; charset=utf-8\r\n"
-    "Connection: close\r\n"
-    "\r\n";
-constexpr std::string_view kHeader500 =
-    "HTTP/1.1 500 Internal Server Error\r\n"
-    "Content-Length: {}\r\n"
-    "Content-Type: text/html; charset=utf-8\r\n"
-    "Connection: close\r\n"
-    "\r\n";
-constexpr std::string_view kHeader400 =
-    "HTTP/1.1 400 Bad Request\r\n"
-    "Content-Length: {}\r\n"
-    "Content-Type: text/html; charset=utf-8\r\n"
-    "Connection: close\r\n"
-    "\r\n";
-constexpr std::string_view kHeader403 =
-    "HTTP/1.1 403 Forbidden\r\n"
-    "Content-Length: {}\r\n"
-    "Content-Type: text/html; charset=utf-8\r\n"
-    "Connection: close\r\n"
-    "\r\n";
-constexpr std::string_view kHeader404 =
-    "HTTP/1.1 404 Not Found\r\n"
-    "Content-Length: {}\r\n"
-    "Content-Type: text/html; charset=utf-8\r\n"
-    "Connection: close\r\n"
-    "\r\n";
-constexpr std::string_view kHeader200 =
-    "HTTP/1.1 200 OK\r\n"
-    "Content-Length: {}\r\n"
-    "Content-Type: text/html; charset=utf-8\r\n"
-    "Connection: {}\r\n"
-    "\r\n";
-constexpr std::string_view kHeader200File =
-    "HTTP/1.1 200 OK\r\n"
-    "Content-Length: {}\r\n"
-    "Content-Type: application/octet-stream\r\n"
-    "Connection: {}\r\n"
-    "\r\n";
-constexpr std::string_view kHtmlWrapFmt = "<html><body>\n{}</body></html>\n";
-constexpr std::string_view kPreFmt = "<pre>\n{}</pre>\n";
-constexpr std::string_view kDirErrorFmt = "[Failed to read directory: {}]\n";
-constexpr std::string_view kFileLinkFmt = "<a href=\"/{}\">{}</a>\n";
 auto load_body(const char* path, std::string* out) -> bool {
-  std::ifstream file(path, std::ios::in | std::ios::binary | std::ios::ate);
+  std::ifstream file(path, std::ios::in | std::ios::binary);
   if (!file.is_open()) {
     return false;
   }
-  auto size = file.tellg();
-  file.seekg(0, std::ios::beg);
-  if (size <= 0) {
-    return false;
-  }
-  out->resize(size);
-  if (file.read(out->data(), size)) {
-    return true;
-  }
-  return false;
+  out->assign(std::istreambuf_iterator<char>(file),
+              std::istreambuf_iterator<char>());
+  return true;
 }
 }  // namespace
 
@@ -129,8 +79,20 @@ void HttpConn::init() {
   check_state_ = CHECK_STATE_REQUESTLINE;
   line_status_ = LINE_OK;
 
-  file_address_ = nullptr;
-  file_stat_ = 0;
+  file_size_ = 0;
+
+  if (file_fd_ != -1) {
+    close(file_fd_);
+    file_fd_ = -1;
+  }
+  write_buf_sent_ = 0;
+  file_bytes_sent_ = 0;
+
+  server_working_dir_.clear();
+  const auto& cfg = GlobalConfig::Instance().Get();
+  if (!cfg.server_working_dir.empty()) {
+    server_working_dir_ = cfg.server_working_dir;
+  }
 }
 
 void HttpConn::init(int sockfd, const sockaddr_in& addr, int fd) {
@@ -192,38 +154,63 @@ auto HttpConn::read() -> bool {
   }
 }
 
-// Send the prepared response to the client (non-blocking ET loop)
+// Write response to socket
 auto HttpConn::write() -> bool {
-  // Write process failed, close connection
   if (write_idx_ == -1) {
     return false;
   }
-  ssize_t bytes_written = 0;
-  ssize_t total_bytes_written = 0;
 
-  // Non-blocking write loop
-  while (total_bytes_written < write_idx_) {
-    bytes_written = send(sockfd_, write_buf_ + total_bytes_written,
-                         write_idx_ - total_bytes_written, 0);
-    if (bytes_written == -1) {
+  // Phase 1: send HTTP header from write_buf_
+  while (write_buf_sent_ < write_idx_) {
+    auto ret = send(sockfd_, write_buf_ + write_buf_sent_,
+                    write_idx_ - write_buf_sent_, 0);
+    if (ret == -1) {
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        // Socket buffer full; re-arm EPOLLOUT for next write attempt
         mod_fd(sockfd_, NetEvent::WRITE_EVENT);
-        return true;  // Keep connection alive for retry
+        return true;
       }
       return false;
     }
-
-    // Connection closed
-    if (bytes_written == 0) {
+    if (ret == 0) {
       return false;
     }
+    write_buf_sent_ += ret;
+  }
 
-    total_bytes_written += bytes_written;
+  // Phase 2: send file body via sendfile
+  if (file_fd_ != -1) {
+    while (file_bytes_sent_ < file_size_) {
+#if defined(__linux__)
+      off_t offset = file_bytes_sent_;
+      auto ret = sendfile(sockfd_, file_fd_, &offset,
+                          static_cast<size_t>(file_size_ - file_bytes_sent_));
+      auto sent = ret;
+#elif defined(__APPLE__)
+      off_t len = file_size_ - file_bytes_sent_;
+      auto ret =
+          sendfile(file_fd_, sockfd_, file_bytes_sent_, &len, nullptr, 0);
+      auto sent = len;
+#endif
+      if (ret == -1) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+#if defined(__APPLE__)
+          file_bytes_sent_ += sent;
+#endif
+          mod_fd(sockfd_, NetEvent::WRITE_EVENT);
+          return true;
+        }
+        close(file_fd_);
+        file_fd_ = -1;
+        return false;
+      }
+      file_bytes_sent_ += sent;
+    }
+    close(file_fd_);
+    file_fd_ = -1;
   }
 
   if (!linger_) {
-    return false;  // Indicate to close connection
+    return false;
   }
 
   init();
@@ -279,112 +266,172 @@ auto HttpConn::process_read() -> HTTP_CODE {
 
 // Process the write operation
 auto HttpConn::process_write(HTTP_CODE ret) -> bool {
-  auto add_server_error = [&]() -> bool {
-    linger_ = false;  // Close connection
-    return add_response(kHeader500Empty);
-  };
-
   switch (ret) {
-    case INTERNAL_ERROR: {
-      std::string body;
-      auto path = (resource_dir() / "html" / "500.html").string();
+    case INTERNAL_ERROR:
+      return write_internal_error();
+    case BAD_REQUEST:
+      return write_bad_request();
+    case FORBIDDEN_REQUEST:
+      return write_forbidden_request();
+    case NO_RESOURCE:
+      return write_no_resource();
+    case GET_REQUEST:
+      return write_get_request();
+    default:
+      return false;
+  }
+}
+
+auto HttpConn::write_internal_error() -> bool {
+  std::string body;
+  auto path = (resource_dir() / "html" / "500.html").string();
+  if (!load_body(path.c_str(), &body)) {
+    return write_server_error();
+  }
+  if (!add_response(std::format(kHeader500, body.size()))) {
+    return false;
+  }
+  return add_response(body);
+}
+
+auto HttpConn::write_bad_request() -> bool {
+  std::string body;
+  auto path = (resource_dir() / "html" / "400.html").string();
+  if (!load_body(path.c_str(), &body)) {
+    return write_server_error();
+  }
+  if (!add_response(std::format(kHeader400, body.size()))) {
+    return false;
+  }
+  return add_response(body);
+}
+
+auto HttpConn::write_forbidden_request() -> bool {
+  std::string body;
+  auto path = (resource_dir() / "html" / "403.html").string();
+  if (!load_body(path.c_str(), &body)) {
+    return write_server_error();
+  }
+  if (!add_response(std::format(kHeader403, body.size()))) {
+    return false;
+  }
+  return add_response(body);
+}
+
+auto HttpConn::write_no_resource() -> bool {
+  std::string body;
+  auto path = (resource_dir() / "html" / "404.html").string();
+  if (!load_body(path.c_str(), &body)) {
+    return write_server_error();
+  }
+  if (!add_response(std::format(kHeader404, body.size()))) {
+    return false;
+  }
+  return add_response(body);
+}
+
+auto HttpConn::write_server_error() -> bool {
+  linger_ = false;
+  return add_response(kHeader500Empty);
+}
+
+auto HttpConn::write_get_request() -> bool {
+  const auto& cfg = GlobalConfig::Instance().Get();
+
+  // Default response without server dir specified
+  if (server_working_dir_.empty()) {
+    std::string body;
+    if (cfg.custom_response_text.has_value()) {
+      body += cfg.custom_response_text.value();
+      body += '\n';
+    }
+
+    if (body.empty()) {
+      auto path = (resource_dir() / "html" / "200.html").string();
       if (!load_body(path.c_str(), &body)) {
-        return add_server_error();
+        return write_server_error();
       }
-      if (!add_response(std::format(kHeader500, body.size()))) {
-        return false;
-      }
-      return add_response(body);
+    } else {
+      body = std::format(kHtmlWrapFmt, body);
     }
 
-    case BAD_REQUEST: {
-      std::string body;
-      auto path = (resource_dir() / "html" / "400.html").string();
-      if (!load_body(path.c_str(), &body)) {
-        return add_server_error();
-      }
-      if (!add_response(std::format(kHeader400, body.size()))) {
-        return false;
-      }
-      return add_response(body);
-    }
-
-    case FORBIDDEN_REQUEST: {
-      std::string body;
-      auto path = (resource_dir() / "html" / "403.html").string();
-      if (!load_body(path.c_str(), &body)) {
-        return add_server_error();
-      }
-      if (!add_response(std::format(kHeader403, body.size()))) {
-        return false;
-      }
-      return add_response(body);
-    }
-
-    case NO_RESOURCE: {
-      std::string body;
-      auto path = (resource_dir() / "html" / "404.html").string();
-      if (!load_body(path.c_str(), &body)) {
-        return add_server_error();
-      }
-      if (!add_response(std::format(kHeader404, body.size()))) {
-        return false;
-      }
-      return add_response(body);
-    }
-
-    case GET_REQUEST: {
-      const auto& cfg = GlobalConfig::Instance().Get();
-      std::string body;
-
-      if (cfg.custom_response_text.has_value()) {
-        body += cfg.custom_response_text.value();
-        body += '\n';
-      }
-
-      if (cfg.server_working_dir.has_value()) {
-        std::string listing;
-        try {
-          for (const auto& entry : std::filesystem::directory_iterator(
-                   cfg.server_working_dir.value())) {
-            if (entry.is_regular_file()) {
-              auto name = entry.path().filename().string();
-              listing += std::format(kFileLinkFmt, name, name);
-            }
-          }
-        } catch (const std::filesystem::filesystem_error& e) {
-          listing += std::format(kDirErrorFmt, e.what());
-        }
-        body += std::format(kPreFmt, listing);
-      }
-
-      if (body.empty()) {
-        auto path = (resource_dir() / "html" / "200.html").string();
-        if (!load_body(path.c_str(), &body)) {
-          return add_server_error();
-        }
-      } else {
-        body = std::format(kHtmlWrapFmt, body);
-      }
-
-      if (!add_response(std::format(kHeader200, body.size(),
-                                    (linger_ ? "keep-alive" : "close")))) {
-        return false;
-      }
-      return add_response(body);
-    }
-
-    case FILE_REQUEST: {
-      // Headers only; file body will be sent separately (e.g. via
-      // mmap/sendfile)
-      return add_response(std::format(kHeader200File, file_stat_,
-                                      (linger_ ? "keep-alive" : "close")));
-    }
-
-    default: {
+    if (!add_response(std::format(kHeader200, body.size(),
+                                  (linger_ ? "keep-alive" : "close")))) {
       return false;
     }
+    return add_response(body);
   }
+
+  // Default request with server dir specified
+  if (url_ == "/") {
+    std::string dir_listing;
+    try {
+      for (const auto& entry :
+           std::filesystem::directory_iterator(server_working_dir_)) {
+        if (entry.is_regular_file()) {
+          auto name = entry.path().filename().string();
+          dir_listing += std::format(kFileLinkFmt, name, name);
+        }
+      }
+    } catch (const std::filesystem::filesystem_error& e) {
+      dir_listing += std::format(kDirErrorFmt, e.what());
+    }
+
+    std::string body;
+    if (cfg.custom_response_text.has_value()) {
+      body += cfg.custom_response_text.value();
+      body += '\n';
+    }
+    body += std::format(kPreFmt, dir_listing);
+    body = std::format(kHtmlWrapFmt, body);
+
+    if (!add_response(std::format(kHeader200, body.size(),
+                                  (linger_ ? "keep-alive" : "close")))) {
+      return false;
+    }
+    return add_response(body);
+  }
+
+  // Request for file, allow single-level plain file only
+  auto requested_path =
+      (server_working_dir_ / url_.substr(1)).lexically_normal();
+
+  // Guard against escape
+  auto [mismatch_start, _] =
+      std::mismatch(server_working_dir_.begin(), server_working_dir_.end(),
+                    requested_path.begin());
+  if (mismatch_start != server_working_dir_.end()) {
+    return write_forbidden_request();
+  }
+
+  // Check single-level
+  auto relative =
+      std::filesystem::relative(requested_path, server_working_dir_);
+  if (relative.empty() || relative.has_parent_path()) {
+    return write_forbidden_request();
+  }
+
+  auto file_status = std::filesystem::symlink_status(requested_path);
+  if (!std::filesystem::exists(file_status)) {
+    return write_no_resource();
+  }
+  if (std::filesystem::is_directory(file_status) ||
+      std::filesystem::is_symlink(file_status)) {
+    return write_forbidden_request();
+  }
+
+  file_fd_ = open(requested_path.c_str(), O_RDONLY);
+  if (file_fd_ == -1) {
+    return write_server_error();
+  }
+  file_size_ = std::filesystem::file_size(requested_path);
+  if (!add_response(std::format(kHeader200File, file_size_,
+                                (linger_ ? "keep-alive" : "close")))) {
+    close(file_fd_);
+    file_fd_ = -1;
+    return false;
+  }
+  return true;
 }
 
 // Parse a line and determine its status (Search \r\n)

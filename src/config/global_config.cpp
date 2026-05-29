@@ -91,7 +91,13 @@ auto GlobalConfig::InitFromArgs(int argc, char* argv[]) -> bool {
         }
         dir = std::string(home) + dir.substr(1);
       }
-      cfg.server_working_dir = dir;
+      std::error_code ec;
+      cfg.server_working_dir = std::filesystem::canonical(dir, ec);
+      if (ec) {
+        std::cerr << std::format("Invalid directory \"{}\" : {}\n", dir,
+                                 ec.message());
+        return false;
+      }
     } else {
       std::cerr << std::format("Invalid parameter: {}\n", argv[i]);
       return false;

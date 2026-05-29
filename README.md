@@ -24,7 +24,7 @@ cmake --build build
 | `--ip IP` | Listening address (default: 127.0.0.1) |
 | `--port N` | Listening port, 1025–65535 (default: 8001) |
 | `--text "..."` | Custom 200 response body text |
-| `--dir PATH` | List files under given directory in 200 response |
+| `--dir PATH` | Serve file listing and file download from a directory |
 
 ## Examples
 
@@ -38,10 +38,12 @@ Custom text response:
 ./build/src/server.o --text "Hello, world!"
 ```
 
-Directory listing:
+Directory listing and file download:
 ```bash
 ./build/src/server.o --dir ~/Desktop/test
 ```
+Open http://localhost:8001/ to see the file list, click any file to download it.
+Only plain files directly under the given directory are served (no subdirectories, no symlinks).
 
 Combined:
 ```bash
