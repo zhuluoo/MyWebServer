@@ -15,6 +15,11 @@ target_include_directories(server.o
     ${PROJECT_SOURCE_DIR}/include/
 )
 
+target_link_libraries(server.o
+  PRIVATE
+    ws2_32
+)
+
 add_custom_command(
   TARGET server.o
   POST_BUILD

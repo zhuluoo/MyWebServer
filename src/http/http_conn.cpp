@@ -20,24 +20,18 @@
 #include "http/http_conn.hpp"
 
 #include <fcntl.h>
+#include <io.h>
+#include <winsock2.h>
 
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
-#include <fstream>
-#if defined(__linux__)
-#include <sys/epoll.h>
-#include <sys/sendfile.h>
-#elif defined(__APPLE__)
-#include <sys/event.h>
-#endif
-#include <sys/socket.h>
-#include <unistd.h>
-
 #include <format>
+#include <fstream>
 
 #include "config/global_config.hpp"
 #include "http/http_response_templates.hpp"
+#include "server/windows_poller.hpp"
 #include "utils/resource_utils.hpp"
 
 namespace my_web_server {
@@ -82,7 +76,7 @@ void HttpConn::init() {
   file_size_ = 0;
 
   if (file_fd_ != -1) {
-    close(file_fd_);
+    _close(file_fd_);
     file_fd_ = -1;
   }
   write_buf_sent_ = 0;
@@ -95,77 +89,64 @@ void HttpConn::init() {
   }
 }
 
-void HttpConn::init(int sockfd, const sockaddr_in& addr, int fd) {
+void HttpConn::init(SOCKET sockfd, const sockaddr_in& addr,
+                    SelectPoller* poller) {
   sockfd_ = sockfd;
   address_ = addr;
-#if defined(__linux__)
-  epollfd_ = fd;
-#elif defined(__APPLE__)
-  kq_ = fd;
-#endif
+  poller_ = poller;
   init();
 }
 
 void HttpConn::process() {
   HTTP_CODE read_ret = process_read();
   if (read_ret == NO_REQUEST) {
-    // Need to read more data; re-arm EPOLLIN for this socket (one-shot)
     mod_fd(sockfd_, NetEvent::READ_EVENT);
     return;
   }
   bool write_ret = process_write(read_ret);
   if (!write_ret) {
-    // Failed to process write, set write_idx_ to -1 to indicate no data to send
     write_idx_ = -1;
   }
-  // Ready to send response in write_buf_, switch to EPOLLOUT for sending
   mod_fd(sockfd_, NetEvent::WRITE_EVENT);
 }
 
-// Read available data from the socket (non-blocking ET loop)
 auto HttpConn::read() -> bool {
   if (read_idx_ >= static_cast<int>(sizeof(read_buf_) - 1)) {
-    return false;  // buffer full -> treat as error
+    return false;
   }
 
-  ssize_t bytes_read = 0;
-  // Non-blocking read loop
+  int bytes_read = 0;
   while (true) {
     bytes_read = recv(sockfd_, read_buf_ + read_idx_,
                       static_cast<int>(sizeof(read_buf_) - read_idx_ - 1), 0);
-    if (bytes_read == -1) {
-      if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        // No more data for now
+    if (bytes_read == SOCKET_ERROR) {
+      if (WSAGetLastError() == WSAEWOULDBLOCK) {
         return true;
       }
       return false;
     }
 
-    // Client closed connection
     if (bytes_read == 0) {
       return false;
     }
 
-    read_idx_ += static_cast<int>(bytes_read);
-    // Buffer overflow
+    read_idx_ += bytes_read;
     if (read_idx_ >= static_cast<int>(sizeof(read_buf_) - 1)) {
       return false;
     }
   }
 }
 
-// Write response to socket
 auto HttpConn::write() -> bool {
   if (write_idx_ == -1) {
     return false;
   }
 
-  // Phase 1: send HTTP header from write_buf_
   while (write_buf_sent_ < write_idx_) {
-    auto ret = send(sockfd_, write_buf_ + write_buf_sent_,
-                    write_idx_ - write_buf_sent_, 0);
-    if (ret == -1) {
-      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+    int ret = send(sockfd_, write_buf_ + write_buf_sent_,
+                   write_idx_ - write_buf_sent_, 0);
+    if (ret == SOCKET_ERROR) {
+      if (WSAGetLastError() == WSAEWOULDBLOCK) {
         mod_fd(sockfd_, NetEvent::WRITE_EVENT);
         return true;
       }
@@ -177,35 +158,34 @@ auto HttpConn::write() -> bool {
     write_buf_sent_ += ret;
   }
 
-  // Phase 2: send file body via sendfile
+  // Not zero-copy: _read + send. TransmitFile needs IOCP which conflicts with
+  // select().
   if (file_fd_ != -1) {
     while (file_bytes_sent_ < file_size_) {
-#if defined(__linux__)
-      off_t offset = file_bytes_sent_;
-      auto ret = sendfile(sockfd_, file_fd_, &offset,
-                          static_cast<size_t>(file_size_ - file_bytes_sent_));
-      auto sent = ret;
-#elif defined(__APPLE__)
-      off_t len = file_size_ - file_bytes_sent_;
-      auto ret =
-          sendfile(file_fd_, sockfd_, file_bytes_sent_, &len, nullptr, 0);
-      auto sent = len;
-#endif
-      if (ret == -1) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-#if defined(__APPLE__)
-          file_bytes_sent_ += sent;
-#endif
-          mod_fd(sockfd_, NetEvent::WRITE_EVENT);
-          return true;
-        }
-        close(file_fd_);
+      constexpr int kFileBufSize = 8192;
+      char file_buf[kFileBufSize];
+      _lseeki64(file_fd_, static_cast<__int64>(file_bytes_sent_), SEEK_SET);
+      int n = _read(
+          file_fd_, file_buf,
+          min(kFileBufSize, static_cast<int>(file_size_ - file_bytes_sent_)));
+      if (n <= 0) {
+        _close(file_fd_);
         file_fd_ = -1;
         return false;
       }
-      file_bytes_sent_ += sent;
+      int ret = send(sockfd_, file_buf, n, 0);
+      if (ret == SOCKET_ERROR) {
+        if (WSAGetLastError() == WSAEWOULDBLOCK) {
+          mod_fd(sockfd_, NetEvent::WRITE_EVENT);
+          return true;
+        }
+        _close(file_fd_);
+        file_fd_ = -1;
+        return false;
+      }
+      file_bytes_sent_ += ret;
     }
-    close(file_fd_);
+    _close(file_fd_);
     file_fd_ = -1;
   }
 
@@ -218,12 +198,10 @@ auto HttpConn::write() -> bool {
   return true;
 }
 
-// Handle the HTTP connection
 auto HttpConn::process_read() -> HTTP_CODE {
   line_status_ = parse_line();
   HTTP_CODE ret = NO_REQUEST;
   char* text = nullptr;
-  // Main state machine loop
   while (line_status_ == LINE_OK) {
     text = read_buf_ + start_line_;
     start_line_ = checked_idx_;
@@ -264,7 +242,6 @@ auto HttpConn::process_read() -> HTTP_CODE {
   return NO_REQUEST;
 }
 
-// Process the write operation
 auto HttpConn::process_write(HTTP_CODE ret) -> bool {
   switch (ret) {
     case INTERNAL_ERROR:
@@ -420,21 +397,20 @@ auto HttpConn::write_get_request() -> bool {
     return write_forbidden_request();
   }
 
-  file_fd_ = open(requested_path.c_str(), O_RDONLY);
+  file_fd_ = _open(requested_path.string().c_str(), _O_RDONLY | _O_BINARY);
   if (file_fd_ == -1) {
     return write_server_error();
   }
   file_size_ = std::filesystem::file_size(requested_path);
   if (!add_response(std::format(kHeader200File, file_size_,
                                 (linger_ ? "keep-alive" : "close")))) {
-    close(file_fd_);
+    _close(file_fd_);
     file_fd_ = -1;
     return false;
   }
   return true;
 }
 
-// Parse a line and determine its status (Search \r\n)
 auto HttpConn::parse_line() -> LINE_STATUS {
   char tmp;
   for (; checked_idx_ < read_idx_; ++checked_idx_) {
@@ -445,7 +421,7 @@ auto HttpConn::parse_line() -> LINE_STATUS {
       }
 
       if (read_buf_[checked_idx_ + 1] == '\n') {
-        read_buf_[checked_idx_++] = '\0';  // For convenience
+        read_buf_[checked_idx_++] = '\0';
         read_buf_[checked_idx_++] = '\0';
         return LINE_OK;
       }
@@ -527,7 +503,6 @@ auto HttpConn::parse_request(char* text) -> HTTP_CODE {
 auto HttpConn::parse_header(char* text) -> HTTP_CODE {
   // \r\n replaced to \0 during parsing
   std::string_view line(text);
-  // An empty line indicates the end of headers
   if (line.empty()) {
     return GET_REQUEST;
   }
@@ -560,17 +535,11 @@ auto HttpConn::parse_header(char* text) -> HTTP_CODE {
   } else {
     // Other headers are ignored for now
   }
-  return NO_REQUEST;  // Need to read more
+  return NO_REQUEST;
 }
 
-// Parse the HTTP message body
-auto HttpConn::parse_content() -> HTTP_CODE {
-  // For GET requests there is typically no message body.
-  // Accept this as a complete request.
-  return GET_REQUEST;
-}
+auto HttpConn::parse_content() -> HTTP_CODE { return GET_REQUEST; }
 
-// Add response data to the write buffer
 auto HttpConn::add_response(std::string_view text) -> bool {
   if (write_idx_ < 0) {
     return false;
@@ -584,48 +553,13 @@ auto HttpConn::add_response(std::string_view text) -> bool {
   return true;
 }
 
-// Set a file descriptor to non-blocking mode
-auto HttpConn::set_nonblocking(int interest_fd) -> int {
-  int old_option = fcntl(interest_fd, F_GETFL);
-  int new_option = old_option | O_NONBLOCK;
-  fcntl(interest_fd, F_SETFL, new_option);
-  return old_option;
+auto HttpConn::set_nonblocking(SOCKET fd) -> int {
+  u_long mode = 1;
+  return ioctlsocket(fd, FIONBIO, &mode);
 }
 
-#if defined(__linux__)
-void HttpConn::mod_fd(int interest_fd, NetEvent ev) {
-  int event_flags = -1;
-  if (ev == NetEvent::READ_EVENT) {
-    event_flags = EPOLLREAD;
-  } else if (ev == NetEvent::WRITE_EVENT) {
-    event_flags = EPOLLOUT;
-  } else {
-    return;
-  }
-
-  epoll_event event;
-  event.data.fd = interest_fd;
-  // Set new events while keeping ET, RDHUP, and ONESHOT flags
-  event.events = event_flags | EPOLLET | EPOLLRDHUP | EPOLLONESHOT;
-  epoll_ctl(epollfd_, EPOLL_CTL_MOD, interest_fd, &event);
+void HttpConn::mod_fd(SOCKET fd, NetEvent ev) {
+  poller_->mod(fd, ev == NetEvent::READ_EVENT);
 }
-#elif defined(__APPLE__)
-void HttpConn::mod_fd(int interest_fd, NetEvent ev) {
-  int16_t filter = -1;
-  if (ev == NetEvent::READ_EVENT) {
-    filter = EVFILT_READ;
-  } else if (ev == NetEvent::WRITE_EVENT) {
-    filter = EVFILT_WRITE;
-  } else {
-    return;
-  }
-
-  struct kevent event;
-  EV_SET(&event, interest_fd, filter,
-         EV_ADD | EV_ENABLE | EV_CLEAR | EV_ONESHOT, 0, 0,
-         (void*)(intptr_t)interest_fd);
-  kevent(kq_, &event, 1, nullptr, 0, nullptr);
-}
-#endif
 
 }  // namespace my_web_server

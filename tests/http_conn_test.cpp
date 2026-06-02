@@ -15,96 +15,106 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-// File overview: End-to-end HttpConn test using socketpair (Linux only).
+// File overview: End-to-end HttpConn test using loopback socket pair.
+
+#define WIN32_LEAN_AND_MEAN
+#define FD_SETSIZE 1024
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "ws2_32.lib")
 
 #include <atomic>
 #include <cassert>
+#include <cstring>
 #include <iostream>
-#if defined(__linux__)
-#include <sys/epoll.h>
-#elif defined(__APPLE__)
-#include <sys/event.h>
-#endif
-#include <fcntl.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <unistd.h>
-
+#include <string>
 #include <thread>
 #include <vector>
 
 #include "http/http_conn.hpp"
+#include "server/windows_poller.hpp"
 
-#if defined(__linux__)
-int main() {
+auto main() -> int {
+  WSADATA wsaData;
+  if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+    std::cerr << "WSAStartup failed\n";
+    return 1;
+  }
+
   std::cout << "Running HTTP Server Tests...\n";
 
-  // End-to-end HttpConn read/process/write using socketpair
-  int sv[2];
-  if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == -1) {
-    perror("socketpair");
-    return 1;
-  }
+  SOCKET server_fd = socket(AF_INET, SOCK_STREAM, 0);
+  assert(server_fd != INVALID_SOCKET);
 
-  int ep = epoll_create1(0);
-  if (ep == -1) {
-    perror("epoll_create1");
-    return 1;
-  }
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+  addr.sin_port = 0;
+  assert(bind(server_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) !=
+         SOCKET_ERROR);
 
-  my_web_server::HttpConn conn;
+  socklen_t addr_len = sizeof(addr);
+  getsockname(server_fd, reinterpret_cast<sockaddr*>(&addr), &addr_len);
+  assert(listen(server_fd, 1) != SOCKET_ERROR);
+
+  u_long mode = 1;
+  ioctlsocket(server_fd, FIONBIO, &mode);
+
+  SOCKET client_fd = socket(AF_INET, SOCK_STREAM, 0);
+  assert(client_fd != INVALID_SOCKET);
+  assert(connect(client_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) !=
+         SOCKET_ERROR);
+
+  SOCKET conn_fd;
+  for (;;) {
+    conn_fd = accept(server_fd, nullptr, nullptr);
+    if (conn_fd != INVALID_SOCKET) break;
+    if (WSAGetLastError() != WSAEWOULDBLOCK) {
+      assert(false);
+    }
+    Sleep(10);
+  }
+  closesocket(server_fd);
+
+  ioctlsocket(conn_fd, FIONBIO, &mode);
+
+  my_web_server::SelectPoller poller;
+  poller.add(conn_fd, true);
+
   sockaddr_in dummy{};
-
-  // Add sv[0] to epoll
-  epoll_event event;
-  event.data.fd = sv[0];
-  event.events = EPOLLIN | EPOLLET | EPOLLRDHUP;
-  event.events |= EPOLLONESHOT;
-  epoll_ctl(ep, EPOLL_CTL_ADD, sv[0], &event);
-  // Set sv[0] non-blocking
-  int old_option = fcntl(sv[0], F_GETFL);
-  int new_option = old_option | O_NONBLOCK;
-  fcntl(sv[0], F_SETFL, new_option);
-
-  conn.init(sv[0], dummy, ep);
+  my_web_server::HttpConn conn;
+  conn.init(conn_fd, dummy, &poller);
   std::cout << "HttpConn initialized\n";
 
-  // Client side sends a request
   const char* req =
       "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
-  ssize_t sent = send(sv[1], req, strlen(req), 0);
+  int sent = send(client_fd, req, static_cast<int>(strlen(req)), 0);
   std::cout << "Client sent: " << sent << " bytes\n";
-  assert(sent == static_cast<ssize_t>(strlen(req)));
+  assert(sent == static_cast<int>(strlen(req)));
 
-  // Server side read into buffer
   bool read_ok = conn.read();
   std::cout << "conn.read() -> " << read_ok << "\n";
   assert(read_ok);
 
-  // Process the request
   conn.process();
   std::cout << "conn.process() called\n";
 
-  // Write the response out
-  // process() should arm EPOLLOUT; call write() to actually send
   bool write_ok = conn.write();
   std::cout << "conn.write() -> " << write_ok << "\n";
 
-  // Client receives the response
   char buf[4096] = {0};
-  ssize_t r = recv(sv[1], buf, sizeof(buf) - 1, 0);
+  int r = recv(client_fd, buf, sizeof(buf) - 1, 0);
   std::cout << "Client recv: " << r << " bytes\n";
   assert(r > 0);
-  std::string resp(buf, r);
+  std::string resp(buf, static_cast<size_t>(r));
   std::cout << "Response received:\n" << resp << "\n";
   std::cout << "HttpConn end-to-end test passed\n";
 
-  // Close sockets and epoll
-  close(sv[0]);
-  close(sv[1]);
-  close(ep);
+  closesocket(conn_fd);
+  closesocket(client_fd);
+
+  WSACleanup();
 
   std::cout << "All tests passed!\n";
   return 0;
 }
-#endif
