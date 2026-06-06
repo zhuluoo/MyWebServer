@@ -8,6 +8,7 @@ target_sources(server.o
     pool/thread_pool.cpp
     server/web_server.cpp
     utils/resource_utils.cpp
+    logger/logger.cpp
 )
 
 target_include_directories(server.o

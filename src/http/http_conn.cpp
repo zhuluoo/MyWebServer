@@ -38,6 +38,7 @@
 
 #include "config/global_config.hpp"
 #include "http/http_response_templates.hpp"
+#include "logger/logger.hpp"
 #include "utils/resource_utils.hpp"
 
 namespace my_web_server {
@@ -61,7 +62,7 @@ HttpConn::HttpConn() {
 
 HttpConn::~HttpConn() = default;
 
-void HttpConn::init() {
+void HttpConn::Init() {
   memset(read_buf_, '\0', sizeof(read_buf_));
   read_idx_ = 0;
   checked_idx_ = 0;
@@ -95,35 +96,34 @@ void HttpConn::init() {
   }
 }
 
-void HttpConn::init(int sockfd, const sockaddr_in& addr, int fd) {
+void HttpConn::Init(int sockfd, const sockaddr_in& addr, int fd) {
   sockfd_ = sockfd;
   address_ = addr;
-#if defined(__linux__)
-  epollfd_ = fd;
-#elif defined(__APPLE__)
-  kq_ = fd;
-#endif
-  init();
+  mux_fd_ = fd;
+  Init();
 }
 
-void HttpConn::process() {
-  HTTP_CODE read_ret = process_read();
+void HttpConn::Process() {
+  HTTP_CODE read_ret = ProcessRead();
   if (read_ret == NO_REQUEST) {
     // Need to read more data; re-arm EPOLLIN for this socket (one-shot)
-    mod_fd(sockfd_, NetEvent::READ_EVENT);
+    ModFd(sockfd_, NetEvent::READ_EVENT);
     return;
   }
-  bool write_ret = process_write(read_ret);
+  bool write_ret = ProcessWrite(read_ret);
   if (!write_ret) {
     // Failed to process write, set write_idx_ to -1 to indicate no data to send
     write_idx_ = -1;
   }
   // Ready to send response in write_buf_, switch to EPOLLOUT for sending
-  mod_fd(sockfd_, NetEvent::WRITE_EVENT);
+  ModFd(sockfd_, NetEvent::WRITE_EVENT);
+
+  LOG_INFO(std::format("{}:{} {} -> {}", ntohl(address_.sin_addr.s_addr),
+                       ntohs(address_.sin_port), url_,
+                       static_cast<int>(read_ret)));
 }
 
-// Read available data from the socket (non-blocking ET loop)
-auto HttpConn::read() -> bool {
+auto HttpConn::Read() -> bool {
   if (read_idx_ >= static_cast<int>(sizeof(read_buf_) - 1)) {
     return false;  // buffer full -> treat as error
   }
@@ -155,7 +155,7 @@ auto HttpConn::read() -> bool {
 }
 
 // Write response to socket
-auto HttpConn::write() -> bool {
+auto HttpConn::Write() -> bool {
   if (write_idx_ == -1) {
     return false;
   }
@@ -166,7 +166,7 @@ auto HttpConn::write() -> bool {
                     write_idx_ - write_buf_sent_, 0);
     if (ret == -1) {
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        mod_fd(sockfd_, NetEvent::WRITE_EVENT);
+        ModFd(sockfd_, NetEvent::WRITE_EVENT);
         return true;
       }
       return false;
@@ -196,7 +196,7 @@ auto HttpConn::write() -> bool {
 #if defined(__APPLE__)
           file_bytes_sent_ += sent;
 #endif
-          mod_fd(sockfd_, NetEvent::WRITE_EVENT);
+          ModFd(sockfd_, NetEvent::WRITE_EVENT);
           return true;
         }
         close(file_fd_);
@@ -213,14 +213,14 @@ auto HttpConn::write() -> bool {
     return false;
   }
 
-  init();
-  mod_fd(sockfd_, NetEvent::READ_EVENT);
+  Init();
+  ModFd(sockfd_, NetEvent::READ_EVENT);
   return true;
 }
 
 // Handle the HTTP connection
-auto HttpConn::process_read() -> HTTP_CODE {
-  line_status_ = parse_line();
+auto HttpConn::ProcessRead() -> HTTP_CODE {
+  line_status_ = ParseLine();
   HTTP_CODE ret = NO_REQUEST;
   char* text = nullptr;
   // Main state machine loop
@@ -229,7 +229,7 @@ auto HttpConn::process_read() -> HTTP_CODE {
     start_line_ = checked_idx_;
     switch (check_state_) {
       case CHECK_STATE_REQUESTLINE: {
-        ret = parse_request(text);
+        ret = ParseRequest(text);
         if (ret == BAD_REQUEST) {
           return BAD_REQUEST;
         }
@@ -237,7 +237,7 @@ auto HttpConn::process_read() -> HTTP_CODE {
       }
 
       case CHECK_STATE_HEADER: {
-        ret = parse_header(text);
+        ret = ParseHeader(text);
         if (ret == BAD_REQUEST) {
           return BAD_REQUEST;
         }
@@ -249,7 +249,7 @@ auto HttpConn::process_read() -> HTTP_CODE {
       }
 
       case CHECK_STATE_CONTENT: {
-        ret = parse_content();
+        ret = ParseContent();
         /* TODO */
         break;
       }
@@ -259,83 +259,83 @@ auto HttpConn::process_read() -> HTTP_CODE {
       }
     }
 
-    line_status_ = parse_line();
+    line_status_ = ParseLine();
   }
   return NO_REQUEST;
 }
 
 // Process the write operation
-auto HttpConn::process_write(HTTP_CODE ret) -> bool {
+auto HttpConn::ProcessWrite(HTTP_CODE ret) -> bool {
   switch (ret) {
     case INTERNAL_ERROR:
-      return write_internal_error();
+      return WriteInternalError();
     case BAD_REQUEST:
-      return write_bad_request();
+      return WriteBadRequest();
     case FORBIDDEN_REQUEST:
-      return write_forbidden_request();
+      return WriteForbiddenRequest();
     case NO_RESOURCE:
-      return write_no_resource();
+      return WriteNoResource();
     case GET_REQUEST:
-      return write_get_request();
+      return WriteGetRequest();
     default:
       return false;
   }
 }
 
-auto HttpConn::write_internal_error() -> bool {
+auto HttpConn::WriteInternalError() -> bool {
   std::string body;
   auto path = (resource_dir() / "html" / "500.html").string();
   if (!load_body(path.c_str(), &body)) {
-    return write_server_error();
+    return WriteServerError();
   }
-  if (!add_response(std::format(kHeader500, body.size()))) {
+  if (!AddResponse(std::format(kHeader500, body.size()))) {
     return false;
   }
-  return add_response(body);
+  return AddResponse(body);
 }
 
-auto HttpConn::write_bad_request() -> bool {
+auto HttpConn::WriteBadRequest() -> bool {
   std::string body;
   auto path = (resource_dir() / "html" / "400.html").string();
   if (!load_body(path.c_str(), &body)) {
-    return write_server_error();
+    return WriteServerError();
   }
-  if (!add_response(std::format(kHeader400, body.size()))) {
+  if (!AddResponse(std::format(kHeader400, body.size()))) {
     return false;
   }
-  return add_response(body);
+  return AddResponse(body);
 }
 
-auto HttpConn::write_forbidden_request() -> bool {
+auto HttpConn::WriteForbiddenRequest() -> bool {
   std::string body;
   auto path = (resource_dir() / "html" / "403.html").string();
   if (!load_body(path.c_str(), &body)) {
-    return write_server_error();
+    return WriteServerError();
   }
-  if (!add_response(std::format(kHeader403, body.size()))) {
+  if (!AddResponse(std::format(kHeader403, body.size()))) {
     return false;
   }
-  return add_response(body);
+  return AddResponse(body);
 }
 
-auto HttpConn::write_no_resource() -> bool {
+auto HttpConn::WriteNoResource() -> bool {
   std::string body;
   auto path = (resource_dir() / "html" / "404.html").string();
   if (!load_body(path.c_str(), &body)) {
-    return write_server_error();
+    return WriteServerError();
   }
-  if (!add_response(std::format(kHeader404, body.size()))) {
+  if (!AddResponse(std::format(kHeader404, body.size()))) {
     return false;
   }
-  return add_response(body);
+  return AddResponse(body);
 }
 
-auto HttpConn::write_server_error() -> bool {
+auto HttpConn::WriteServerError() -> bool {
   linger_ = false;
-  return add_response(kHeader500Empty);
+  return AddResponse(kHeader500Empty);
 }
 
-auto HttpConn::write_get_request() -> bool {
+auto HttpConn::WriteGetRequest() -> bool {
   const auto& cfg = GlobalConfig::Instance().Get();
 
   // Default response without server dir specified
@@ -349,17 +349,17 @@ auto HttpConn::write_get_request() -> bool {
     if (body.empty()) {
       auto path = (resource_dir() / "html" / "200.html").string();
       if (!load_body(path.c_str(), &body)) {
-        return write_server_error();
+        return WriteServerError();
       }
     } else {
       body = std::format(kHtmlWrapFmt, body);
     }
 
-    if (!add_response(std::format(kHeader200, body.size(),
-                                  (linger_ ? "keep-alive" : "close")))) {
+    if (!AddResponse(std::format(kHeader200, body.size(),
+                                 (linger_ ? "keep-alive" : "close")))) {
       return false;
     }
-    return add_response(body);
+    return AddResponse(body);
   }
 
   // Default request with server dir specified
@@ -385,11 +385,11 @@ auto HttpConn::write_get_request() -> bool {
     body += std::format(kPreFmt, dir_listing);
     body = std::format(kHtmlWrapFmt, body);
 
-    if (!add_response(std::format(kHeader200, body.size(),
-                                  (linger_ ? "keep-alive" : "close")))) {
+    if (!AddResponse(std::format(kHeader200, body.size(),
+                                 (linger_ ? "keep-alive" : "close")))) {
       return false;
     }
-    return add_response(body);
+    return AddResponse(body);
   }
 
   // Request for file, allow single-level plain file only
@@ -401,32 +401,34 @@ auto HttpConn::write_get_request() -> bool {
       std::mismatch(server_working_dir_.begin(), server_working_dir_.end(),
                     requested_path.begin());
   if (mismatch_start != server_working_dir_.end()) {
-    return write_forbidden_request();
+    return WriteForbiddenRequest();
   }
 
   // Check single-level
   auto relative =
       std::filesystem::relative(requested_path, server_working_dir_);
   if (relative.empty() || relative.has_parent_path()) {
-    return write_forbidden_request();
+    return WriteForbiddenRequest();
   }
 
   auto file_status = std::filesystem::symlink_status(requested_path);
   if (!std::filesystem::exists(file_status)) {
-    return write_no_resource();
+    return WriteNoResource();
   }
   if (std::filesystem::is_directory(file_status) ||
       std::filesystem::is_symlink(file_status)) {
-    return write_forbidden_request();
+    return WriteForbiddenRequest();
   }
 
   file_fd_ = open(requested_path.c_str(), O_RDONLY);
   if (file_fd_ == -1) {
-    return write_server_error();
+    return WriteServerError();
   }
   file_size_ = std::filesystem::file_size(requested_path);
-  if (!add_response(std::format(kHeader200File, file_size_,
-                                (linger_ ? "keep-alive" : "close")))) {
+  LOG_INFO(std::format("Serving file: {} ({} bytes)", requested_path.string(),
+                       file_size_));
+  if (!AddResponse(std::format(kHeader200File, file_size_,
+                               (linger_ ? "keep-alive" : "close")))) {
     close(file_fd_);
     file_fd_ = -1;
     return false;
@@ -435,7 +437,7 @@ auto HttpConn::write_get_request() -> bool {
 }
 
 // Parse a line and determine its status (Search \r\n)
-auto HttpConn::parse_line() -> LINE_STATUS {
+auto HttpConn::ParseLine() -> LINE_STATUS {
   char tmp;
   for (; checked_idx_ < read_idx_; ++checked_idx_) {
     tmp = read_buf_[checked_idx_];
@@ -465,7 +467,7 @@ auto HttpConn::parse_line() -> LINE_STATUS {
   return LINE_OPEN;
 }
 
-auto HttpConn::parse_request(char* text) -> HTTP_CODE {
+auto HttpConn::ParseRequest(char* text) -> HTTP_CODE {
   int start = 0;
   int end = 0;
   version_ = 0;
@@ -524,7 +526,7 @@ auto HttpConn::parse_request(char* text) -> HTTP_CODE {
   return NO_REQUEST;
 }
 
-auto HttpConn::parse_header(char* text) -> HTTP_CODE {
+auto HttpConn::ParseHeader(char* text) -> HTTP_CODE {
   // \r\n replaced to \0 during parsing
   std::string_view line(text);
   // An empty line indicates the end of headers
@@ -564,14 +566,14 @@ auto HttpConn::parse_header(char* text) -> HTTP_CODE {
 }
 
 // Parse the HTTP message body
-auto HttpConn::parse_content() -> HTTP_CODE {
+auto HttpConn::ParseContent() -> HTTP_CODE {
   // For GET requests there is typically no message body.
   // Accept this as a complete request.
   return GET_REQUEST;
 }
 
 // Add response data to the write buffer
-auto HttpConn::add_response(std::string_view text) -> bool {
+auto HttpConn::AddResponse(std::string_view text) -> bool {
   if (write_idx_ < 0) {
     return false;
   }
@@ -585,7 +587,7 @@ auto HttpConn::add_response(std::string_view text) -> bool {
 }
 
 // Set a file descriptor to non-blocking mode
-auto HttpConn::set_nonblocking(int interest_fd) -> int {
+auto HttpConn::SetNonblocking(int interest_fd) -> int {
   int old_option = fcntl(interest_fd, F_GETFL);
   int new_option = old_option | O_NONBLOCK;
   fcntl(interest_fd, F_SETFL, new_option);
@@ -593,7 +595,7 @@ auto HttpConn::set_nonblocking(int interest_fd) -> int {
 }
 
 #if defined(__linux__)
-void HttpConn::mod_fd(int interest_fd, NetEvent ev) {
+void HttpConn::ModFd(int interest_fd, NetEvent ev) {
   int event_flags = -1;
   if (ev == NetEvent::READ_EVENT) {
     event_flags = EPOLLREAD;
@@ -607,10 +609,10 @@ void HttpConn::mod_fd(int interest_fd, NetEvent ev) {
   event.data.fd = interest_fd;
   // Set new events while keeping ET, RDHUP, and ONESHOT flags
   event.events = event_flags | EPOLLET | EPOLLRDHUP | EPOLLONESHOT;
-  epoll_ctl(epollfd_, EPOLL_CTL_MOD, interest_fd, &event);
+  epoll_ctl(mux_fd_, EPOLL_CTL_MOD, interest_fd, &event);
 }
 #elif defined(__APPLE__)
-void HttpConn::mod_fd(int interest_fd, NetEvent ev) {
+void HttpConn::ModFd(int interest_fd, NetEvent ev) {
   int16_t filter = -1;
   if (ev == NetEvent::READ_EVENT) {
     filter = EVFILT_READ;
@@ -624,7 +626,7 @@ void HttpConn::mod_fd(int interest_fd, NetEvent ev) {
   EV_SET(&event, interest_fd, filter,
          EV_ADD | EV_ENABLE | EV_CLEAR | EV_ONESHOT, 0, 0,
          (void*)(intptr_t)interest_fd);
-  kevent(kq_, &event, 1, nullptr, 0, nullptr);
+  kevent(mux_fd_, &event, 1, nullptr, 0, nullptr);
 }
 #endif
 

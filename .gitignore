@@ -2,3 +2,4 @@ build/
 build_xcode/
 bin/
 .vscode/
+AGENTS.md

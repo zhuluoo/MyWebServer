@@ -18,9 +18,9 @@
 // File overview: Entry point that validates args and runs WebServer.
 
 #include <format>
-#include <iostream>
 
 #include "config/global_config.hpp"
+#include "logger/logger.hpp"
 #include "server/web_server.hpp"
 
 auto main(int argc, char* argv[]) -> int {
@@ -30,10 +30,10 @@ auto main(int argc, char* argv[]) -> int {
   }
 
   const auto& cfg = config.Get();
-  std::cout << std::format("Initializing web server at ip {} port {}.\n",
-                           cfg.ip, cfg.port);
+  LOG_INFO(std::format("Initializing web server at ip {} port {} dir {}.",
+                       cfg.ip, cfg.port, cfg.server_working_dir.string()));
 
   my_web_server::WebServer server(cfg.ip.c_str(), cfg.port);
-  server.run();
+  server.Run();
   return 0;
 }

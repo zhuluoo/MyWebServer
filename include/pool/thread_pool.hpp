@@ -38,7 +38,7 @@ class ThreadPool {
   auto operator=(const ThreadPool&) -> ThreadPool& = delete;
 
   template <typename F>
-  void add_task(F&& task);
+  void AddTask(F&& task);
 
  private:
   struct Pool {
@@ -54,7 +54,7 @@ class ThreadPool {
 };
 
 template <typename F>
-void ThreadPool::add_task(F&& task) {
+void ThreadPool::AddTask(F&& task) {
   std::unique_lock<std::mutex> lock(pool_->mtx);
   if (pool_->is_closed) {
     throw std::runtime_error("ThreadPool is closed. Cannot add new task.");

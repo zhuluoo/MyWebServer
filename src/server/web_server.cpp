@@ -21,6 +21,7 @@
 #include <fcntl.h>
 
 #include <cstring>
+#include <format>
 #if defined(__linux__)
 #include <sys/epoll.h>
 #elif defined(__APPLE__)
@@ -29,6 +30,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include "logger/logger.hpp"
 #include "pool/thread_pool.hpp"
 #include "server/web_server.hpp"
 
@@ -40,38 +42,30 @@ WebServer::WebServer(const char* ip, int port, std::size_t max_conn,
   // Initialize listening socket, epoll instance, and thread pool here
   listen_fd_ = socket(AF_INET, SOCK_STREAM, 0);
   if (listen_fd_ == -1) {
-    perror("Socket creation error");
+    LOG_ERROR(std::format("Socket creation error: {}", strerror(errno)));
     exit(EXIT_FAILURE);
   }
 #if defined(__linux__)
-  epoll_fd_ = epoll_create(5);
-  if (epoll_fd_ == -1) {
-    perror("Epoll creation error.");
-    exit(EXIT_FAILURE);
-  }
+  mux_fd_ = epoll_create(5);
 #elif defined(__APPLE__)
-  kq_fd_ = kqueue();
-  if (kq_fd_ == -1) {
-    perror("Kqueue creation error.");
+  mux_fd_ = kqueue();
+#endif
+  if (mux_fd_ == -1) {
+    LOG_ERROR("Multiplex creation error.");
     exit(EXIT_FAILURE);
   }
-#endif
   thread_pool_ = std::make_unique<ThreadPool>(thread_num);
 }
 
 WebServer::~WebServer() {
   close(listen_fd_);
-#if defined(__linux__)
-  close(epoll_fd_);
-#elif defined(__APPLE__)
-  close(kq_fd_);
-#endif
+  close(mux_fd_);
   free(ip_);
   users_.clear();
   thread_pool_.reset();
 }
 
-void WebServer::start_listening() {
+void WebServer::StartListening() {
   // Enable address reuse to avoid "Address already in use" errors
   int opt = 1;
   setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
@@ -85,29 +79,30 @@ void WebServer::start_listening() {
   ret =
       bind(listen_fd_, reinterpret_cast<sockaddr*>(&address), sizeof(address));
   if (ret == -1) {
-    perror("Bind error");
+    LOG_ERROR(std::format("Bind error: {}", strerror(errno)));
     exit(EXIT_FAILURE);
   }
 
   ret = listen(listen_fd_, SOMAXCONN);
   if (ret == -1) {
-    perror("Listen error");
+    LOG_ERROR(std::format("Listen error: {}", strerror(errno)));
     exit(EXIT_FAILURE);
   }
 
-  add_fd(listen_fd_, false);
+  AddFd(listen_fd_, false);
+  LOG_INFO("Start listening successfully.");
 }
 
 #if defined(__linux__)
-void WebServer::run() {
+void WebServer::Run() {
   epoll_event events[kMaxEvents];
-  start_listening();
+  StartListening();
   // Main event loop would go here
   while (true) {
-    int num_events = epoll_wait(epoll_fd_, events, kMaxEvents, -1);
+    int num_events = epoll_wait(mux_fd_, events, kMaxEvents, -1);
     // error and not interrupted by signal
     if (num_events < 0 && errno != EINTR) {
-      perror("Epoll wait error");
+      LOG_ERROR(std::format("Epoll wait error: {}", strerror(errno)));
       break;
     }
 
@@ -127,68 +122,72 @@ void WebServer::run() {
               // No more pending connections
               break;
             }
-            perror("Accept error");
+            LOG_ERROR(std::format("Accept error: {}", strerror(errno)));
             break;
           }
           if (users_.size() >= max_conn_) {
+            LOG_WARN("Exceeds the maximum connections.");
             close(conn_fd);
             continue;
           }
           users_[conn_fd] = std::make_shared<HttpConn>();
-          users_[conn_fd]->init(conn_fd, client_addr, epoll_fd_);
-          add_fd(conn_fd, true);
+          users_[conn_fd]->Init(conn_fd, client_addr, mux_fd_);
+          AddFd(conn_fd, true);
+          LOG_INFO(std::format("New connection fd={} ip={} port={}", conn_fd,
+                               ntohl(client_addr.sin_addr.s_addr),
+                               ntohs(client_addr.sin_port)));
         }  // end of accept loop
       } else if (events[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR)) {
         // Connection closed or error
         users_.erase(sockfd);
-        remove_fd(sockfd);
+        RemoveFd(sockfd);
       } else if (events[i].events & EPOLLIN) {
         // Read event: fill buffer, then dispatch to thread pool for parsing
         auto conn = users_[sockfd];  // Copy shared_ptr, not reference!
-        if (!conn->read()) {
+        if (!conn->Read()) {
           // Read error or connection closed by client
           users_.erase(sockfd);
-          remove_fd(sockfd);
+          RemoveFd(sockfd);
           continue;
         }
-        thread_pool_->add_task(
-            [conn]() { conn->process(); });  // Capture by value!
+        thread_pool_->AddTask(
+            [conn]() { conn->Process(); });  // Capture by value!
       } else if (events[i].events & EPOLLOUT) {
         // Write event: attempt to send pending data
-        if (!users_[sockfd]->write()) {
+        if (!users_[sockfd]->Write()) {
           // write() closes the connection on failure
           users_.erase(sockfd);
-          remove_fd(sockfd);
+          RemoveFd(sockfd);
         }
       }
     }
   }
 }
 
-void WebServer::add_fd(int interest_fd, bool one_shot) {
+void WebServer::AddFd(int interest_fd, bool one_shot) {
   epoll_event event;
   event.data.fd = interest_fd;
   event.events = EPOLLIN | EPOLLET | EPOLLRDHUP;
   if (one_shot) {
     event.events |= EPOLLONESHOT;
   }
-  epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, interest_fd, &event);
-  set_nonblocking(interest_fd);
+  epoll_ctl(mux_fd_, EPOLL_CTL_ADD, interest_fd, &event);
+  SetNonblocking(interest_fd);
 }
 
-void WebServer::remove_fd(int interest_fd) {
-  epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, interest_fd, nullptr);
+void WebServer::RemoveFd(int interest_fd) {
+  epoll_ctl(mux_fd_, EPOLL_CTL_DEL, interest_fd, nullptr);
   close(interest_fd);
 }
 #elif defined(__APPLE__)
-void WebServer::run() {
+void WebServer::Run() {
   struct kevent events[kMaxEvents];
-  start_listening();
+  StartListening();
   while (true) {
-    int num_events = kevent(kq_fd_, nullptr, 0, events, kMaxEvents, nullptr);
+    int num_events = kevent(mux_fd_, nullptr, 0, events, kMaxEvents, nullptr);
     // Error and not interrupted by signal
     if (num_events < 0 && errno != EINTR) {
-      perror("Kqueue wait error");
+      LOG_ERROR(std::format("Kqueue wait error: {}", strerror(errno)));
       break;
     }
 
@@ -199,7 +198,7 @@ void WebServer::run() {
 
       if (flags & (EV_ERROR | EV_EOF)) {
         users_.erase(sockfd);
-        remove_fd(sockfd);
+        RemoveFd(sockfd);
         continue;
       }
 
@@ -216,44 +215,49 @@ void WebServer::run() {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
               break;
             }
-            perror("Accept connection error.");
+            LOG_ERROR(
+                std::format("Accept connection error: {}", strerror(errno)));
             break;
           }
 
           if (users_.size() >= max_conn_) {
+            LOG_WARN("Exceeds the maximum connections.");
             close(conn_fd);
             continue;
           }
 
           users_[conn_fd] = std::make_shared<HttpConn>();
-          users_[conn_fd]->init(conn_fd, client_addr, kq_fd_);
-          add_fd(conn_fd, true);
+          users_[conn_fd]->Init(conn_fd, client_addr, mux_fd_);
+          AddFd(conn_fd, true);
+          LOG_INFO(std::format("New connection fd={} ip={} port={}", conn_fd,
+                               ntohl(client_addr.sin_addr.s_addr),
+                               ntohs(client_addr.sin_port)));
         }
         continue;
       }
 
       if (filter == EVFILT_READ) {
         auto conn = users_[sockfd];
-        if (!conn || !conn->read()) {
+        if (!conn || !conn->Read()) {
           users_.erase(sockfd);
-          remove_fd(sockfd);
+          RemoveFd(sockfd);
           continue;
         }
-        thread_pool_->add_task([conn]() { conn->process(); });
+        thread_pool_->AddTask([conn]() { conn->Process(); });
       }
 
       if (filter == EVFILT_WRITE) {
         auto conn = users_[sockfd];
-        if (!conn || !conn->write()) {
+        if (!conn || !conn->Write()) {
           users_.erase(sockfd);
-          remove_fd(sockfd);
+          RemoveFd(sockfd);
         }
       }
     }
   }
 }
 
-void WebServer::add_fd(int interest_fd, bool one_shot) {
+void WebServer::AddFd(int interest_fd, bool one_shot) {
   struct kevent event;
   uint16_t flags = EV_ADD | EV_ENABLE | EV_CLEAR;
   if (one_shot) {
@@ -261,21 +265,21 @@ void WebServer::add_fd(int interest_fd, bool one_shot) {
   }
   EV_SET(&event, interest_fd, EVFILT_READ, flags, 0, 0,
          (void*)(intptr_t)interest_fd);
-  if (kevent(kq_fd_, &event, 1, nullptr, 0, nullptr) == -1) {
-    perror("Kqueue add failed.");
+  if (kevent(mux_fd_, &event, 1, nullptr, 0, nullptr) == -1) {
+    LOG_WARN(std::format("Kqueue add failed: {}", strerror(errno)));
   }
-  set_nonblocking(interest_fd);
+  SetNonblocking(interest_fd);
 }
 
-void WebServer::remove_fd(int interest_fd) {
+void WebServer::RemoveFd(int interest_fd) {
   struct kevent event;
   EV_SET(&event, interest_fd, EVFILT_READ, EV_DELETE, 0, 0, nullptr);
-  kevent(kq_fd_, &event, 1, nullptr, 0, nullptr);
+  kevent(mux_fd_, &event, 1, nullptr, 0, nullptr);
   close(interest_fd);
 }
 #endif
 
-auto WebServer::set_nonblocking(int interest_fd) -> int {
+auto WebServer::SetNonblocking(int interest_fd) -> int {
   int old_option = fcntl(interest_fd, F_GETFL);
   int new_option = old_option | O_NONBLOCK;
   fcntl(interest_fd, F_SETFL, new_option);

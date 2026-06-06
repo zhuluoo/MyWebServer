@@ -71,44 +71,40 @@ class HttpConn {
   auto operator=(const HttpConn&) -> HttpConn& = delete;
   ~HttpConn();
 
-  void init();
-  void init(int sockfd, const sockaddr_in& addr, int fd);
+  void Init();
+  void Init(int sockfd, const sockaddr_in& addr, int fd);
   // Handle the HTTP connection
-  void process();
+  void Process();
   // Non-block read all available data from the socket(for ET mode)
-  auto read() -> bool;
+  auto Read() -> bool;
   // Non-block write all data to the socket(for ET mode)
-  auto write() -> bool;
+  auto Write() -> bool;
 
  private:
   // Process the read operation
-  auto process_read() -> HTTP_CODE;
-  auto parse_request(char*) -> HTTP_CODE;  // For request line
-  auto parse_header(char*) -> HTTP_CODE;   // For headers
-  auto parse_content() -> HTTP_CODE;       // For message body
-  auto parse_line() -> LINE_STATUS;        // Find a complete line
+  auto ProcessRead() -> HTTP_CODE;
+  auto ParseRequest(char*) -> HTTP_CODE;  // For request line
+  auto ParseHeader(char*) -> HTTP_CODE;   // For headers
+  auto ParseContent() -> HTTP_CODE;       // For message body
+  auto ParseLine() -> LINE_STATUS;        // Find a complete line
 
   // Process the write operation
-  auto process_write(HTTP_CODE ret) -> bool;
-  auto write_internal_error() -> bool;
-  auto write_bad_request() -> bool;
-  auto write_forbidden_request() -> bool;
-  auto write_no_resource() -> bool;
-  auto write_get_request() -> bool;
-  auto write_server_error() -> bool;
-  auto add_response(std::string_view text)
+  auto ProcessWrite(HTTP_CODE ret) -> bool;
+  auto WriteInternalError() -> bool;
+  auto WriteBadRequest() -> bool;
+  auto WriteForbiddenRequest() -> bool;
+  auto WriteNoResource() -> bool;
+  auto WriteGetRequest() -> bool;
+  auto WriteServerError() -> bool;
+  auto AddResponse(std::string_view text)
       -> bool;  // Add response to write buffer
 
   // Utility functions for epoll
-  auto set_nonblocking(int interest_fd) -> int;
-  void mod_fd(int interest_fd, NetEvent ev);
+  auto SetNonblocking(int interest_fd) -> int;
+  void ModFd(int interest_fd, NetEvent ev);
 
-  int sockfd_{-1};  // socket file descriptor
-#if defined(__linux__)
-  int epollfd_{-1};  // epoll file descriptor
-#elif defined(__APPLE__)
-  int kq_{-1};
-#endif
+  int sockfd_{-1};       // socket file descriptor
+  int mux_fd_{-1};       // epoll/kqueue file descriptor
   sockaddr_in address_;  // client address
 
   char read_buf_[kReadBufferSize];  // read buffer
