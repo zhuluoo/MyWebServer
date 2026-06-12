@@ -74,9 +74,11 @@ class HttpConn {
   enum class NetEvent { READ_EVENT, WRITE_EVENT };
 
   HttpConn();
+  ~HttpConn();
   HttpConn(const HttpConn&) = delete;
   auto operator=(const HttpConn&) -> HttpConn& = delete;
-  ~HttpConn();
+  HttpConn(HttpConn&&) = delete;
+  auto operator=(HttpConn&&) -> HttpConn& = delete;
 
   void init();
   void init(SOCKET sockfd, const sockaddr_in& addr, SelectPoller* poller);

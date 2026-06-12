@@ -38,6 +38,10 @@ class GlobalConfig {
   auto InitFromArgs(int argc, char* argv[]) -> bool;
   auto Get() const -> const ServerConfig&;
 
+  GlobalConfig(const GlobalConfig&) = delete;
+  auto operator=(const GlobalConfig&) -> GlobalConfig& = delete;
+  GlobalConfig(GlobalConfig&&) = delete;
+  auto operator=(GlobalConfig&&) -> GlobalConfig& = delete;
  private:
   GlobalConfig() = default;
 
