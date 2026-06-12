@@ -39,6 +39,8 @@ class WebServer {
   ~WebServer();
   WebServer(const WebServer&) = delete;
   auto operator=(const WebServer&) -> WebServer& = delete;
+  WebServer(WebServer&&) = delete;
+  auto operator=(WebServer&&) -> WebServer& = delete;
 
   // Start the web server
   void Run();

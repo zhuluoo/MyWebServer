@@ -47,6 +47,10 @@ class Logger {
 
   auto entries() const -> const std::vector<LogEntry>&;
 
+  Logger(const Logger&) = delete;
+  auto operator=(const Logger&) -> Logger& = delete;
+  Logger(Logger&&) = delete;
+  auto operator=(Logger&&) -> Logger&  = delete;
  private:
   Logger() = default;
 

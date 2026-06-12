@@ -36,6 +36,8 @@ class ThreadPool {
   ~ThreadPool();
   ThreadPool(const ThreadPool&) = delete;
   auto operator=(const ThreadPool&) -> ThreadPool& = delete;
+  ThreadPool(ThreadPool&&) = delete;
+  auto operator=(ThreadPool&&) -> ThreadPool& = delete;
 
   template <typename F>
   void AddTask(F&& task);
