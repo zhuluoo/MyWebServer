@@ -26,7 +26,7 @@
 namespace my_web_server {
 
 struct ServerConfig {
-  std::string ip{"127.0.0.1"};
+  std::string ip{"0.0.0.0"};
   int port{8001};
   std::optional<std::string> custom_response_text{};
   std::filesystem::path server_working_dir{};

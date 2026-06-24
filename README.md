@@ -21,7 +21,7 @@ cmake --build build
 
 | Option | Description |
 |--------|-------------|
-| `--ip IP` | Listening address (default: 127.0.0.1) |
+| `--ip IP` | Listening address (default: 0.0.0.0) |
 | `--port N` | Listening port, 1025–65535 (default: 8001) |
 | `--text "..."` | Custom 200 response body text |
 | `--dir PATH` | Serve file listing and file download from a directory |
@@ -48,4 +48,18 @@ Only plain files directly under the given directory are served (no subdirectorie
 Combined:
 ```bash
 ./build/src/server.o --ip 0.0.0.0 --port 9090 --text "Files:" --dir ./mydir
+```
+
+# Stopping
+
+The server shuts down gracefully on `SIGINT` (Ctrl-C), `SIGTERM` (`kill <pid>`),
+or `SIGHUP`. On any of these it stops accepting new connections, lets in-flight
+requests finish, closes active connections, flushes the log, and exits cleanly.
+
+```bash
+# In the foreground:
+Ctrl-C
+
+# By PID:
+kill <pid>
 ```

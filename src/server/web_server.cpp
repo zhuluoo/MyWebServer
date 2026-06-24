@@ -18,6 +18,7 @@
 // File overview: Implements WebServer socket setup and event loop.
 
 #include <arpa/inet.h>
+#include <csignal>
 #include <fcntl.h>
 
 #include <cstring>
@@ -36,10 +37,24 @@
 
 namespace my_web_server {
 
+namespace {
+
+int g_signal_pipe[2] = {-1, -1};
+
+// Async-signal-safe: only writes one byte and preserves errno.
+void HandleSignal(int sig) {
+  int saved_errno = errno;
+  char byte = static_cast<char>(sig);
+  ssize_t n = write(g_signal_pipe[1], &byte, 1);
+  (void)n;
+  errno = saved_errno;
+}
+
+}  // namespace
+
 WebServer::WebServer(const char* ip, int port, std::size_t max_conn,
                      std::size_t thread_num)
     : ip_(strdup(ip)), port_(port), max_conn_(max_conn) {
-  // Initialize listening socket, epoll instance, and thread pool here
   listen_fd_ = socket(AF_INET, SOCK_STREAM, 0);
   if (listen_fd_ == -1) {
     LOG_ERROR(std::format("Socket creation error: {}", strerror(errno)));
@@ -57,13 +72,7 @@ WebServer::WebServer(const char* ip, int port, std::size_t max_conn,
   thread_pool_ = std::make_unique<ThreadPool>(thread_num);
 }
 
-WebServer::~WebServer() {
-  close(listen_fd_);
-  close(mux_fd_);
-  free(ip_);
-  users_.clear();
-  thread_pool_.reset();
-}
+WebServer::~WebServer() { CleanUp(); }
 
 void WebServer::StartListening() {
   // Enable address reuse to avoid "Address already in use" errors
@@ -93,12 +102,41 @@ void WebServer::StartListening() {
   LOG_INFO("Start listening successfully.");
 }
 
+void WebServer::SetupSignalHandling() {
+  if (pipe(g_signal_pipe) == -1) {
+    LOG_ERROR(std::format("Signal pipe creation error: {}", strerror(errno)));
+    exit(EXIT_FAILURE);
+  }
+
+  for (int fd : g_signal_pipe) {
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+    fcntl(fd, F_SETFD, fcntl(fd, F_GETFD) | FD_CLOEXEC);
+  }
+
+  AddFd(g_signal_pipe[0], false);
+
+  struct sigaction sa{};
+  sa.sa_handler = HandleSignal;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = 0;  // No SA_RESTART: blocking syscalls return EINTR too.
+  sigaction(SIGINT, &sa, nullptr);
+  sigaction(SIGTERM, &sa, nullptr);
+  sigaction(SIGHUP, &sa, nullptr);
+
+  struct sigaction ignore{};
+  ignore.sa_handler = SIG_IGN;
+  sigemptyset(&ignore.sa_mask);
+  ignore.sa_flags = 0;
+  sigaction(SIGPIPE, &ignore, nullptr);
+}
+
 #if defined(__linux__)
 void WebServer::Run() {
   epoll_event events[kMaxEvents];
   StartListening();
+  SetupSignalHandling();
   // Main event loop would go here
-  while (true) {
+  while (running_) {
     int num_events = epoll_wait(mux_fd_, events, kMaxEvents, -1);
     // error and not interrupted by signal
     if (num_events < 0 && errno != EINTR) {
@@ -108,6 +146,15 @@ void WebServer::Run() {
 
     for (int i = 0; i < num_events; ++i) {
       int sockfd = events[i].data.fd;
+      // Shutdown signal arrived via the self-pipe.
+      if (sockfd == g_signal_pipe[0]) {
+        char buf[64];
+        while (read(g_signal_pipe[0], buf, sizeof(buf)) > 0) {
+        }
+        LOG_INFO("Received shutdown signal, starting graceful shutdown.");
+        running_ = false;
+        break;
+      }
       // New connection
       if (sockfd == listen_fd_) {
         // In ET mode, must accept ALL pending connections in a loop
@@ -162,6 +209,7 @@ void WebServer::Run() {
       }
     }
   }
+  CleanUp();
 }
 
 void WebServer::AddFd(int interest_fd, bool one_shot) {
@@ -179,11 +227,14 @@ void WebServer::RemoveFd(int interest_fd) {
   epoll_ctl(mux_fd_, EPOLL_CTL_DEL, interest_fd, nullptr);
   close(interest_fd);
 }
+
 #elif defined(__APPLE__)
+
 void WebServer::Run() {
   struct kevent events[kMaxEvents];
   StartListening();
-  while (true) {
+  SetupSignalHandling();
+  while (running_) {
     int num_events = kevent(mux_fd_, nullptr, 0, events, kMaxEvents, nullptr);
     // Error and not interrupted by signal
     if (num_events < 0 && errno != EINTR) {
@@ -195,6 +246,16 @@ void WebServer::Run() {
       int sockfd = static_cast<int>(events[i].ident);
       uint16_t flags = events[i].flags;
       int16_t filter = events[i].filter;
+
+      // Shutdown signal arrived via the self-pipe.
+      if (sockfd == g_signal_pipe[0]) {
+        char buf[64];
+        while (read(g_signal_pipe[0], buf, sizeof(buf)) > 0) {
+        }
+        LOG_INFO("Received shutdown signal, starting graceful shutdown.");
+        running_ = false;
+        break;
+      }
 
       if (flags & (EV_ERROR | EV_EOF)) {
         users_.erase(sockfd);
@@ -255,6 +316,7 @@ void WebServer::Run() {
       }
     }
   }
+  CleanUp();
 }
 
 void WebServer::AddFd(int interest_fd, bool one_shot) {
@@ -284,6 +346,36 @@ auto WebServer::SetNonblocking(int interest_fd) -> int {
   int new_option = old_option | O_NONBLOCK;
   fcntl(interest_fd, F_SETFL, new_option);
   return old_option;
+}
+
+void WebServer::CleanUp() {
+  if (mux_fd_ == -1) {
+    return;  // Already cleaned up
+  }
+  // 1. Drain in-flight tasks first
+  thread_pool_.reset();
+
+  // 2. Close active client connections
+  for (const auto& entry : users_) {
+    RemoveFd(entry.first);
+  }
+  users_.clear();
+
+  // 3. Tear down the multiplexer, listening socket and self-pipe.
+  close(mux_fd_);
+  mux_fd_ = -1;
+  close(listen_fd_);
+  listen_fd_ = -1;
+  for (int& fd : g_signal_pipe) {
+    if (fd != -1) {
+      close(fd);
+      fd = -1;
+    }
+  }
+  free(ip_);
+  ip_ = nullptr;
+
+  LOG_INFO("Graceful shutdown complete.");
 }
 
 }  // namespace my_web_server

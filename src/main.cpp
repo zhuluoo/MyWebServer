@@ -30,10 +30,12 @@ auto main(int argc, char* argv[]) -> int {
   }
 
   const auto& cfg = config.Get();
-  LOG_INFO(std::format("Initializing web server at ip {} port {} dir {}.",
+  LOG_INFO(std::format("Initializing web server at ip {} port {} dir \"{}\".",
                        cfg.ip, cfg.port, cfg.server_working_dir.string()));
+  my_web_server::Logger::Instance().Flush();
 
   my_web_server::WebServer server(cfg.ip.c_str(), cfg.port);
   server.Run();
+  my_web_server::Logger::Instance().Flush();
   return 0;
 }
