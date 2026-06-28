@@ -42,52 +42,53 @@ auto GlobalConfig::InitFromArgs(int argc, char* argv[]) -> bool {
     std::string_view para = argv[i];
     if (para == "--ip") {
       if (i + 1 >= argc) {
-        LOG_ERROR("No ip specified.");
+        LOG_ERROR("[Args analysis] No ip specified.");
         return false;
       }
       cfg.ip = argv[++i];
     } else if (para == "--port") {
       if (i + 1 >= argc) {
-        LOG_ERROR("No port specified.");
+        LOG_ERROR("[Args analysis] No port specified.");
         return false;
       }
 
       std::string_view port = argv[++i];
       if (port.size() < 4 || port.size() > 5) {
-        LOG_ERROR("Port number must be between 1025 and 65535");
+        LOG_ERROR("[Args analysis] Port number must be between 1025 and 65535");
         return false;
       }
 
       int port_number = 0;
       for (char ch : port) {
         if (ch < '0' || ch > '9') {
-          LOG_ERROR("Port number must be between 1025 and 65535");
+          LOG_ERROR(
+              "[Args analysis] Port number must be between 1025 and 65535");
           return false;
         }
         port_number = port_number * 10 + (ch - '0');
       }
 
       if (port_number <= 1024 || port_number >= 65536) {
-        LOG_ERROR("Port number must be between 1025 and 65535");
+        LOG_ERROR("[Args analysis] Port number must be between 1025 and 65535");
         return false;
       }
       cfg.port = port_number;
     } else if (para == "--text") {
       if (i + 1 >= argc) {
-        LOG_ERROR("No text specified.");
+        LOG_ERROR("[Args analysis] No text specified.");
         return false;
       }
       cfg.custom_response_text = argv[++i];
     } else if (para == "--dir") {
       if (i + 1 >= argc) {
-        LOG_ERROR("No directory specified.");
+        LOG_ERROR("[Args analysis] No directory specified.");
         return false;
       }
       std::string dir = argv[++i];
       if (!dir.empty() && dir[0] == '~') {
         auto home = std::getenv("HOME");
         if (home == nullptr) {
-          LOG_ERROR("Fail to get home dir for '~'.");
+          LOG_ERROR("[Args analysis] Fail to get home dir for '~'.");
           return false;
         }
         dir = std::string(home) + dir.substr(1);
@@ -95,12 +96,12 @@ auto GlobalConfig::InitFromArgs(int argc, char* argv[]) -> bool {
       std::error_code ec;
       cfg.server_working_dir = std::filesystem::canonical(dir, ec);
       if (ec) {
-        LOG_ERROR(
-            std::format("Invalid directory \"{}\" : {}", dir, ec.message()));
+        LOG_ERROR(std::format("[Args analysis] Invalid directory \"{}\" : {}",
+                              dir, ec.message()));
         return false;
       }
     } else {
-      LOG_ERROR(std::format("Invalid parameter: {}", argv[i]));
+      LOG_ERROR(std::format("[Args analysis] Invalid parameter: {}", argv[i]));
       return false;
     }
   }

@@ -61,8 +61,8 @@ class WebServer {
   int port_;              // Server port
   std::size_t max_conn_;  // Maximum number of connections
 
-  int listen_fd_;         // Listening socket file descriptor
-  int mux_fd_;            // epoll/kqueue file descriptor
+  int listen_fd_;  // Listening socket file descriptor
+  int mux_fd_;     // epoll/kqueue file descriptor
   std::unordered_map<int, std::shared_ptr<HttpConn>>
       users_;  // Map of active HTTP connections
   std::unique_ptr<ThreadPool> thread_pool_;

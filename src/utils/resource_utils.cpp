@@ -19,6 +19,8 @@
 
 #include "utils/resource_utils.hpp"
 
+#include "logger/logger.hpp"
+
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
 #elif defined(__linux__)
@@ -36,6 +38,7 @@ auto get_executable_dir() -> std::filesystem::path {
   if (_NSGetExecutablePath(buffer.data(), &size) == 0) {
     return std::filesystem::path(buffer).parent_path();
   }
+  LOG_ERROR("Fail to get executable dir.");
   return {};
 #elif defined(__linux__)
   std::string buffer(4096, '\0');
@@ -44,8 +47,10 @@ auto get_executable_dir() -> std::filesystem::path {
     buffer.resize(static_cast<size_t>(count));
     return std::filesystem::path(buffer).parent_path();
   }
+  LOG_ERROR("Fail to get executable dir.");
   return {};
 #else
+  LOG_ERROR("Operation system not support.");
   return {};
 #endif
 }

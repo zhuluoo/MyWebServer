@@ -42,6 +42,7 @@ class GlobalConfig {
   auto operator=(const GlobalConfig&) -> GlobalConfig& = delete;
   GlobalConfig(GlobalConfig&&) = delete;
   auto operator=(GlobalConfig&&) -> GlobalConfig& = delete;
+
  private:
   GlobalConfig() = default;
 

@@ -35,6 +35,7 @@
 #include <unistd.h>
 
 #include <format>
+#include <system_error>
 
 #include "config/global_config.hpp"
 #include "http/http_response_templates.hpp"
@@ -106,16 +107,15 @@ void HttpConn::Init(int sockfd, const sockaddr_in& addr, int fd) {
 void HttpConn::Process() {
   HTTP_CODE read_ret = ProcessRead();
   if (read_ret == NO_REQUEST) {
-    // Need to read more data; re-arm EPOLLIN for this socket (one-shot)
+    // Need to read more data
     ModFd(sockfd_, NetEvent::READ_EVENT);
     return;
   }
   bool write_ret = ProcessWrite(read_ret);
   if (!write_ret) {
-    // Failed to process write, set write_idx_ to -1 to indicate no data to send
     write_idx_ = -1;
   }
-  // Ready to send response in write_buf_, switch to EPOLLOUT for sending
+  // Ready to send response
   ModFd(sockfd_, NetEvent::WRITE_EVENT);
 
   LOG_INFO(std::format("{}:{} {} -> {}", ntohl(address_.sin_addr.s_addr),
@@ -125,11 +125,11 @@ void HttpConn::Process() {
 
 auto HttpConn::Read() -> bool {
   if (read_idx_ >= static_cast<int>(sizeof(read_buf_) - 1)) {
-    return false;  // buffer full -> treat as error
+    LOG_WARN(std::format("Socket: {} read buffer is full.", sockfd_));
+    return false;
   }
 
   ssize_t bytes_read = 0;
-  // Non-blocking read loop
   while (true) {
     bytes_read = recv(sockfd_, read_buf_ + read_idx_,
                       static_cast<int>(sizeof(read_buf_) - read_idx_ - 1), 0);
@@ -138,17 +138,19 @@ auto HttpConn::Read() -> bool {
         // No more data for now
         return true;
       }
+      LOG_WARN(std::format("Socket {} error during read. Error: {}", sockfd_,
+                           std::system_category().message(errno)));
       return false;
     }
 
-    // Client closed connection
     if (bytes_read == 0) {
+      LOG_INFO(std::format("Socket: {} client closed connection.", sockfd_));
       return false;
     }
 
     read_idx_ += static_cast<int>(bytes_read);
-    // Buffer overflow
     if (read_idx_ >= static_cast<int>(sizeof(read_buf_) - 1)) {
+      LOG_WARN(std::format("Socket: {} read buffer is full.", sockfd_));
       return false;
     }
   }
@@ -157,6 +159,8 @@ auto HttpConn::Read() -> bool {
 // Write response to socket
 auto HttpConn::Write() -> bool {
   if (write_idx_ == -1) {
+    LOG_ERROR(std::format("Socket {} write failed due to process write failed.",
+                          sockfd_));
     return false;
   }
 
@@ -201,6 +205,8 @@ auto HttpConn::Write() -> bool {
         }
         close(file_fd_);
         file_fd_ = -1;
+        LOG_WARN(std::format("Socket {} write failed due to {}", sockfd_,
+                             std::system_category().message(errno)));
         return false;
       }
       file_bytes_sent_ += sent;
@@ -218,12 +224,10 @@ auto HttpConn::Write() -> bool {
   return true;
 }
 
-// Handle the HTTP connection
 auto HttpConn::ProcessRead() -> HTTP_CODE {
   line_status_ = ParseLine();
   HTTP_CODE ret = NO_REQUEST;
   char* text = nullptr;
-  // Main state machine loop
   while (line_status_ == LINE_OK) {
     text = read_buf_ + start_line_;
     start_line_ = checked_idx_;
@@ -231,6 +235,7 @@ auto HttpConn::ProcessRead() -> HTTP_CODE {
       case CHECK_STATE_REQUESTLINE: {
         ret = ParseRequest(text);
         if (ret == BAD_REQUEST) {
+          LOG_INFO(std::format("Socket {} client BAD_REQUEST", sockfd_));
           return BAD_REQUEST;
         }
         break;
@@ -239,9 +244,11 @@ auto HttpConn::ProcessRead() -> HTTP_CODE {
       case CHECK_STATE_HEADER: {
         ret = ParseHeader(text);
         if (ret == BAD_REQUEST) {
+          LOG_INFO(std::format("Socket {} client BAD_REQUEST", sockfd_));
           return BAD_REQUEST;
         }
         if (ret == GET_REQUEST) {
+          LOG_INFO(std::format("Socket {} client GET_REQUEST", sockfd_));
           return GET_REQUEST;
         }
         // We ignore other cases for now
@@ -283,6 +290,7 @@ auto HttpConn::ProcessWrite(HTTP_CODE ret) -> bool {
 }
 
 auto HttpConn::WriteInternalError() -> bool {
+  LOG_INFO(std::format("Socket {} write 500 Internal Server Error", sockfd_));
   std::string body;
   auto path = (resource_dir() / "html" / "500.html").string();
   if (!load_body(path.c_str(), &body)) {
@@ -295,6 +303,7 @@ auto HttpConn::WriteInternalError() -> bool {
 }
 
 auto HttpConn::WriteBadRequest() -> bool {
+  LOG_INFO(std::format("Socket {} write 400 Bad Request", sockfd_));
   std::string body;
   auto path = (resource_dir() / "html" / "400.html").string();
   if (!load_body(path.c_str(), &body)) {
@@ -307,6 +316,7 @@ auto HttpConn::WriteBadRequest() -> bool {
 }
 
 auto HttpConn::WriteForbiddenRequest() -> bool {
+  LOG_INFO(std::format("Socket {} write 403 Forbidden", sockfd_));
   std::string body;
   auto path = (resource_dir() / "html" / "403.html").string();
   if (!load_body(path.c_str(), &body)) {
@@ -319,6 +329,7 @@ auto HttpConn::WriteForbiddenRequest() -> bool {
 }
 
 auto HttpConn::WriteNoResource() -> bool {
+  LOG_INFO(std::format("Socket {} write 404 Not Found", sockfd_));
   std::string body;
   auto path = (resource_dir() / "html" / "404.html").string();
   if (!load_body(path.c_str(), &body)) {
@@ -331,15 +342,18 @@ auto HttpConn::WriteNoResource() -> bool {
 }
 
 auto HttpConn::WriteServerError() -> bool {
+  LOG_INFO(std::format("Socket {} server error", sockfd_));
   linger_ = false;
   return AddResponse(kHeader500Empty);
 }
 
 auto HttpConn::WriteGetRequest() -> bool {
+  LOG_INFO(std::format("Socket {} write 200 OK", sockfd_));
   const auto& cfg = GlobalConfig::Instance().Get();
 
   // Default response without server dir specified
   if (server_working_dir_.empty()) {
+    LOG_INFO(std::format("Socket {} respond basic default content", sockfd_));
     std::string body;
     if (cfg.custom_response_text.has_value()) {
       body += cfg.custom_response_text.value();
@@ -364,6 +378,7 @@ auto HttpConn::WriteGetRequest() -> bool {
 
   // Default request with server dir specified
   if (url_ == "/") {
+    LOG_INFO(std::format("Socket {} respond basic content", sockfd_));
     std::string dir_listing;
     try {
       for (const auto& entry :
@@ -393,35 +408,44 @@ auto HttpConn::WriteGetRequest() -> bool {
   }
 
   // Request for file, allow single-level plain file only
+  LOG_INFO(std::format("Socket {} respond file", sockfd_));
   auto requested_path =
       (server_working_dir_ / url_.substr(1)).lexically_normal();
 
-  // Guard against escape
   auto [mismatch_start, _] =
       std::mismatch(server_working_dir_.begin(), server_working_dir_.end(),
                     requested_path.begin());
   if (mismatch_start != server_working_dir_.end()) {
+    LOG_INFO(std::format("Socket {} the requested file is outside the dir",
+                         sockfd_));
     return WriteForbiddenRequest();
   }
 
-  // Check single-level
   auto relative =
       std::filesystem::relative(requested_path, server_working_dir_);
   if (relative.empty() || relative.has_parent_path()) {
+    LOG_INFO(std::format("Socket {} the requested file is not single level",
+                         sockfd_));
     return WriteForbiddenRequest();
   }
 
   auto file_status = std::filesystem::symlink_status(requested_path);
   if (!std::filesystem::exists(file_status)) {
+    LOG_INFO(
+        std::format("Socket {} the requested file is not existent", sockfd_));
     return WriteNoResource();
   }
   if (std::filesystem::is_directory(file_status) ||
       std::filesystem::is_symlink(file_status)) {
+    LOG_INFO(
+        std::format("Socket {} the requested file is dir or symlink", sockfd_));
     return WriteForbiddenRequest();
   }
 
   file_fd_ = open(requested_path.c_str(), O_RDONLY);
   if (file_fd_ == -1) {
+    LOG_ERROR(std::format("Socket {} failed to open the requested file {}",
+                          sockfd_, requested_path.string()));
     return WriteServerError();
   }
   file_size_ = std::filesystem::file_size(requested_path);
@@ -443,6 +467,7 @@ auto HttpConn::ParseLine() -> LINE_STATUS {
     tmp = read_buf_[checked_idx_];
     if (tmp == '\r') {
       if ((checked_idx_ + 1) == read_idx_) {
+        LOG_INFO(std::format("Socket {} client msg LINE_OPEN", sockfd_));
         return LINE_OPEN;
       }
 
@@ -451,6 +476,7 @@ auto HttpConn::ParseLine() -> LINE_STATUS {
         read_buf_[checked_idx_++] = '\0';
         return LINE_OK;
       }
+      LOG_INFO(std::format("Socket {} client msg LINE_BAD", sockfd_));
       return LINE_BAD;
     }
 
@@ -460,6 +486,7 @@ auto HttpConn::ParseLine() -> LINE_STATUS {
         read_buf_[checked_idx_++] = '\0';
         return LINE_OK;
       }
+      LOG_INFO(std::format("Socket {} client msg LINE_BAD", sockfd_));
       return LINE_BAD;
     }
   }
@@ -478,6 +505,8 @@ auto HttpConn::ParseRequest(char* text) -> HTTP_CODE {
       if (method == "GET") {
         method_ = GET;
       } else {
+        LOG_INFO(
+            std::format("Socket {} method {} not support", sockfd_, method));
         return BAD_REQUEST;  // We only support GET for now
       }
       break;
@@ -511,6 +540,8 @@ auto HttpConn::ParseRequest(char* text) -> HTTP_CODE {
       if (version == "HTTP/1.1") {
         version_ = 1;
       } else {
+        LOG_INFO(std::format("Socket {} http version {} not support", sockfd_,
+                             version));
         return BAD_REQUEST;  // We only support HTTP/1.1 for now
       }
       break;
@@ -579,6 +610,7 @@ auto HttpConn::AddResponse(std::string_view text) -> bool {
   }
   size_t remaining = sizeof(write_buf_) - static_cast<size_t>(write_idx_);
   if (text.size() > remaining) {
+    LOG_WARN(std::format("Socket {} write buffer is full", sockfd_));
     return false;
   }
   std::memcpy(write_buf_ + write_idx_, text.data(), text.size());

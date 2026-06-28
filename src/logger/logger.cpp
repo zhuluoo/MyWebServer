@@ -54,6 +54,8 @@ auto Logger::Instance() -> Logger& {
   return instance;
 }
 
+Logger::~Logger() { Flush(); }
+
 void Logger::Log(LogLevel level, const char* file, int line,
                  std::string message) {
   auto thread_id = std::hash<std::thread::id>{}(std::this_thread::get_id());
@@ -74,9 +76,10 @@ void Logger::Flush() {
 
 void Logger::FlushLocked() {
   for (const auto& entry : entries_) {
-    auto line =
-        std::format("[{}] [{}] [{}] {}\n", FormatTimestamp(entry.timestamp),
-                    LevelToString(entry.level), entry.thread_id, entry.message);
+    auto line = std::format("[{}] [{}] [{}] [{}:{}] {}\n",
+                            FormatTimestamp(entry.timestamp),
+                            LevelToString(entry.level), entry.thread_id,
+                            entry.file, entry.line, entry.message);
     std::fputs(line.c_str(), stderr);
   }
   entries_.clear();

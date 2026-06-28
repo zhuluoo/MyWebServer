@@ -24,7 +24,6 @@
 #include <memory>
 #include <mutex>
 #include <queue>
-#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -40,7 +39,7 @@ class ThreadPool {
   auto operator=(ThreadPool&&) -> ThreadPool& = delete;
 
   template <typename F>
-  void AddTask(F&& task);
+  [[nodiscard]] auto AddTask(F&& task) -> bool;
 
  private:
   struct Pool {
@@ -56,14 +55,15 @@ class ThreadPool {
 };
 
 template <typename F>
-void ThreadPool::AddTask(F&& task) {
+auto ThreadPool::AddTask(F&& task) -> bool {
   std::unique_lock<std::mutex> lock(pool_->mtx);
   if (pool_->is_closed) {
-    throw std::runtime_error("ThreadPool is closed. Cannot add new task.");
+    return false;
   }
   pool_->tasks.emplace(std::forward<F>(task));
   lock.unlock();
   pool_->cond.notify_one();
+  return true;
 }
 
 }  // namespace my_web_server

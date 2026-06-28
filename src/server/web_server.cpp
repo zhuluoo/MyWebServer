@@ -18,11 +18,12 @@
 // File overview: Implements WebServer socket setup and event loop.
 
 #include <arpa/inet.h>
-#include <csignal>
 #include <fcntl.h>
 
+#include <csignal>
 #include <cstring>
 #include <format>
+#include <system_error>
 #if defined(__linux__)
 #include <sys/epoll.h>
 #elif defined(__APPLE__)
@@ -57,7 +58,8 @@ WebServer::WebServer(const char* ip, int port, std::size_t max_conn,
     : ip_(strdup(ip)), port_(port), max_conn_(max_conn) {
   listen_fd_ = socket(AF_INET, SOCK_STREAM, 0);
   if (listen_fd_ == -1) {
-    LOG_ERROR(std::format("Socket creation error: {}", strerror(errno)));
+    LOG_ERROR(std::format("Socket creation error: {}",
+                          std::system_category().message(errno)));
     exit(EXIT_FAILURE);
   }
 #if defined(__linux__)
@@ -88,13 +90,15 @@ void WebServer::StartListening() {
   ret =
       bind(listen_fd_, reinterpret_cast<sockaddr*>(&address), sizeof(address));
   if (ret == -1) {
-    LOG_ERROR(std::format("Bind error: {}", strerror(errno)));
+    LOG_ERROR(
+        std::format("Bind error: {}", std::system_category().message(errno)));
     exit(EXIT_FAILURE);
   }
 
   ret = listen(listen_fd_, SOMAXCONN);
   if (ret == -1) {
-    LOG_ERROR(std::format("Listen error: {}", strerror(errno)));
+    LOG_ERROR(
+        std::format("Listen error: {}", std::system_category().message(errno)));
     exit(EXIT_FAILURE);
   }
 
@@ -104,7 +108,8 @@ void WebServer::StartListening() {
 
 void WebServer::SetupSignalHandling() {
   if (pipe(g_signal_pipe) == -1) {
-    LOG_ERROR(std::format("Signal pipe creation error: {}", strerror(errno)));
+    LOG_ERROR(std::format("Signal pipe creation error: {}",
+                          std::system_category().message(errno)));
     exit(EXIT_FAILURE);
   }
 
@@ -128,6 +133,8 @@ void WebServer::SetupSignalHandling() {
   sigemptyset(&ignore.sa_mask);
   ignore.sa_flags = 0;
   sigaction(SIGPIPE, &ignore, nullptr);
+
+  LOG_INFO("Signal register successfully.");
 }
 
 #if defined(__linux__)
@@ -135,12 +142,11 @@ void WebServer::Run() {
   epoll_event events[kMaxEvents];
   StartListening();
   SetupSignalHandling();
-  // Main event loop would go here
   while (running_) {
     int num_events = epoll_wait(mux_fd_, events, kMaxEvents, -1);
-    // error and not interrupted by signal
     if (num_events < 0 && errno != EINTR) {
-      LOG_ERROR(std::format("Epoll wait error: {}", strerror(errno)));
+      LOG_ERROR(std::format("Epoll wait error: {}",
+                            std::system_category().message(errno)));
       break;
     }
 
@@ -169,7 +175,8 @@ void WebServer::Run() {
               // No more pending connections
               break;
             }
-            LOG_ERROR(std::format("Accept error: {}", strerror(errno)));
+            LOG_ERROR(std::format("Accept error: {}",
+                                  std::system_category().message(errno)));
             break;
           }
           if (users_.size() >= max_conn_) {
@@ -183,7 +190,7 @@ void WebServer::Run() {
           LOG_INFO(std::format("New connection fd={} ip={} port={}", conn_fd,
                                ntohl(client_addr.sin_addr.s_addr),
                                ntohs(client_addr.sin_port)));
-        }  // end of accept loop
+        }
       } else if (events[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR)) {
         // Connection closed or error
         users_.erase(sockfd);
@@ -197,18 +204,25 @@ void WebServer::Run() {
           RemoveFd(sockfd);
           continue;
         }
-        thread_pool_->AddTask(
-            [conn]() { conn->Process(); });  // Capture by value!
+        if (!thread_pool_->AddTask([conn]() { conn->Process(); })) {
+          LOG_ERROR(std::format(
+              "Socket {} dropped: failed to enqueue task to thread pool.",
+              sockfd));
+          users_.erase(sockfd);
+          RemoveFd(sockfd);
+          continue;
+        }
       } else if (events[i].events & EPOLLOUT) {
         // Write event: attempt to send pending data
         if (!users_[sockfd]->Write()) {
-          // write() closes the connection on failure
+          // Write() closes the connection on failure
           users_.erase(sockfd);
           RemoveFd(sockfd);
         }
       }
     }
   }
+  LOG_INFO("Main epoll event loop terminate.");
   CleanUp();
 }
 
@@ -236,9 +250,9 @@ void WebServer::Run() {
   SetupSignalHandling();
   while (running_) {
     int num_events = kevent(mux_fd_, nullptr, 0, events, kMaxEvents, nullptr);
-    // Error and not interrupted by signal
     if (num_events < 0 && errno != EINTR) {
-      LOG_ERROR(std::format("Kqueue wait error: {}", strerror(errno)));
+      LOG_ERROR(std::format("Kqueue wait error: {}",
+                            std::system_category().message(errno)));
       break;
     }
 
@@ -276,8 +290,8 @@ void WebServer::Run() {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
               break;
             }
-            LOG_ERROR(
-                std::format("Accept connection error: {}", strerror(errno)));
+            LOG_ERROR(std::format("Accept connection error: {}",
+                                  std::system_category().message(errno)));
             break;
           }
 
@@ -304,7 +318,14 @@ void WebServer::Run() {
           RemoveFd(sockfd);
           continue;
         }
-        thread_pool_->AddTask([conn]() { conn->Process(); });
+        if (!thread_pool_->AddTask([conn]() { conn->Process(); })) {
+          LOG_ERROR(std::format(
+              "Socket {} dropped: failed to enqueue task to thread pool.",
+              sockfd));
+          users_.erase(sockfd);
+          RemoveFd(sockfd);
+          continue;
+        }
       }
 
       if (filter == EVFILT_WRITE) {
@@ -316,6 +337,7 @@ void WebServer::Run() {
       }
     }
   }
+  LOG_INFO("Main kqueue event loop terminate.");
   CleanUp();
 }
 
@@ -328,7 +350,8 @@ void WebServer::AddFd(int interest_fd, bool one_shot) {
   EV_SET(&event, interest_fd, EVFILT_READ, flags, 0, 0,
          (void*)(intptr_t)interest_fd);
   if (kevent(mux_fd_, &event, 1, nullptr, 0, nullptr) == -1) {
-    LOG_WARN(std::format("Kqueue add failed: {}", strerror(errno)));
+    LOG_WARN(std::format("Kqueue add failed: {}",
+                         std::system_category().message(errno)));
   }
   SetNonblocking(interest_fd);
 }
