@@ -8,6 +8,7 @@ target_sources(server.o
     pool/thread_pool.cpp
     server/web_server.cpp
     utils/resource_utils.cpp
+    utils/base64.cpp
     logger/logger.cpp
 )
 

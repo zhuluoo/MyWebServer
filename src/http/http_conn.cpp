@@ -40,6 +40,7 @@
 #include "config/global_config.hpp"
 #include "http/http_response_templates.hpp"
 #include "logger/logger.hpp"
+#include "utils/base64.hpp"
 #include "utils/resource_utils.hpp"
 
 namespace my_web_server {
@@ -385,7 +386,9 @@ auto HttpConn::WriteGetRequest() -> bool {
            std::filesystem::directory_iterator(server_working_dir_)) {
         if (entry.is_regular_file()) {
           auto name = entry.path().filename().string();
-          dir_listing += std::format(kFileLinkFmt, name, name);
+          auto name_base64 = Utf8ToBase64(name);
+          name_base64.append(kFilenameBase64Suff);  // Indicate base64 encoding
+          dir_listing += std::format(kFileLinkFmt, name_base64, name);
         }
       }
     } catch (const std::filesystem::filesystem_error& e) {
@@ -409,8 +412,11 @@ auto HttpConn::WriteGetRequest() -> bool {
 
   // Request for file, allow single-level plain file only
   LOG_INFO(std::format("Socket {} respond file", sockfd_));
+  auto requested_name_utf8 = url_.ends_with(kFilenameBase64Suff)
+                                 ? Base64ToUtf8(url_.substr(1, url_.size() - 4))
+                                 : url_.substr(1);
   auto requested_path =
-      (server_working_dir_ / url_.substr(1)).lexically_normal();
+      (server_working_dir_ / requested_name_utf8).lexically_normal();
 
   auto [mismatch_start, _] =
       std::mismatch(server_working_dir_.begin(), server_working_dir_.end(),
@@ -452,6 +458,7 @@ auto HttpConn::WriteGetRequest() -> bool {
   LOG_INFO(std::format("Serving file: {} ({} bytes)", requested_path.string(),
                        file_size_));
   if (!AddResponse(std::format(kHeader200File, file_size_,
+                               requested_path.filename().string(),
                                (linger_ ? "keep-alive" : "close")))) {
     close(file_fd_);
     file_fd_ = -1;

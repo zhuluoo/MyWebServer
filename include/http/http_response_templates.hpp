@@ -63,6 +63,7 @@ inline constexpr std::string_view kHeader200File =
     "HTTP/1.1 200 OK\r\n"
     "Content-Length: {}\r\n"
     "Content-Type: application/octet-stream\r\n"
+    "Content-Disposition: attachment; filename=\"{}\"\r\n"
     "Connection: {}\r\n"
     "\r\n";
 inline constexpr std::string_view kHtmlWrapFmt =
@@ -71,5 +72,6 @@ inline constexpr std::string_view kPreFmt = "<pre>\n{}</pre>\n";
 inline constexpr std::string_view kDirErrorFmt =
     "[Failed to read directory: {}]\n";
 inline constexpr std::string_view kFileLinkFmt = "<a href=\"/{}\">{}</a>\n";
+inline constexpr std::string_view kFilenameBase64Suff = "===";
 
 }  // namespace my_web_server
