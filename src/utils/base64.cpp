@@ -86,14 +86,14 @@ auto Utf8ToBase64(std::string_view str_utf8) -> std::string {
     }
 
     int idx3 = ((static_cast<unsigned char>(sv[1]) & 0b00001111) << 2) +
-               (static_cast<unsigned char>(sv[1]) >> 6);
+               (static_cast<unsigned char>(sv[2]) >> 6);
     str_base64.push_back(kBase64Map[idx3]);
     int idx4 = static_cast<unsigned char>(sv[2]) & 0b00111111;
     str_base64.push_back(kBase64Map[idx4]);
   };
 
   for (size_t i = 0; i < str_utf8.size(); i += 3) {
-    binary_process(str_utf8.substr(i, i + 3));
+    binary_process(str_utf8.substr(i, 3));
   }
   return str_base64;
 }
@@ -127,7 +127,7 @@ auto Base64ToUtf8(std::string_view str_base64) -> std::string {
   };
 
   for (std::size_t i = 0; i < str_base64.size(); i += 4) {
-    binary_process(str_base64.substr(i, i + 4));
+    binary_process(str_base64.substr(i, 4));
   }
 
   return str_utf8;

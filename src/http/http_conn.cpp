@@ -637,7 +637,7 @@ auto HttpConn::SetNonblocking(int interest_fd) -> int {
 void HttpConn::ModFd(int interest_fd, NetEvent ev) {
   int event_flags = -1;
   if (ev == NetEvent::READ_EVENT) {
-    event_flags = EPOLLREAD;
+    event_flags = EPOLLIN;
   } else if (ev == NetEvent::WRITE_EVENT) {
     event_flags = EPOLLOUT;
   } else {
