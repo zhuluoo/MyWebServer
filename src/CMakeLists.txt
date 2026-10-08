@@ -1,6 +1,16 @@
-add_executable(server.o)
+add_executable(myserver)
 
-target_sources(server.o
+target_compile_features(myserver
+  PRIVATE
+    cxx_std_20
+)
+
+target_include_directories(myserver
+  PRIVATE
+    ${PROJECT_SOURCE_DIR}/include/
+)
+
+target_sources(myserver
   PRIVATE
     main.cpp
     config/global_config.cpp
@@ -12,19 +22,16 @@ target_sources(server.o
     logger/logger.cpp
 )
 
-target_include_directories(server.o
-  PRIVATE
-    ${PROJECT_SOURCE_DIR}/include/
-)
-
 add_custom_command(
-  TARGET server.o
+  TARGET myserver
   POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_directory
           ${CMAKE_SOURCE_DIR}/resources
-          $<TARGET_FILE_DIR:server.o>/resources
+          $<TARGET_FILE_DIR:myserver>/resources
+  COMMENT "Copying resources next to server executable"
+  VERBATIM
 )
 
 # Specify installation rules (copying files to system directories on make install).
-install(TARGETS server.o DESTINATION bin)
+install(TARGETS myserver DESTINATION bin)
 install(DIRECTORY ${CMAKE_SOURCE_DIR}/resources/ DESTINATION bin/resources)
